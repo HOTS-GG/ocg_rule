@@ -2,6 +2,7 @@
 
 - data/cards.json   : 한국어 이름이 있는 전체 카드의 종류·스탯·한국어 효과 텍스트·패스코드·아키타입
 - data/banlist.json : KONAMI 공식 리미트 레귤레이션 (한국 OCG / 일본 OCG)
+- data/meta.json    : 대회 덱 통계 (yugiohmeta.com 의 덱 유형별 카드 채용률, OCG 우선)
 
 사용법
   python tools/update_data.py                 # 새 카드만 추가 + 리미트 레귤레이션 갱신
@@ -12,6 +13,7 @@
   카드 텍스트 : db.ygoresources.com (KONAMI 공식 카드 DB 미러)
   패스코드·아키타입 : db.ygoprodeck.com
   리미트 레귤레이션 : www.db.yugioh-card.com (KONAMI 공식)
+  대회 덱 통계 : www.yugiohmeta.com (공개 API)
 """
 import argparse, concurrent.futures as cf, html, json, os, re, sys, time, urllib.request
 
@@ -20,6 +22,7 @@ DATA = os.path.join(ROOT, 'data')
 YR = 'https://db.ygoresources.com'
 YPD = 'https://db.ygoprodeck.com/api/v7/cardinfo.php?misc=yes'
 OFFICIAL = 'https://www.db.yugioh-card.com/yugiohdb/forbidden_limited.action?request_locale='
+YM = 'https://www.yugiohmeta.com/api/v1'
 UA = {'User-Agent': 'Mozilla/5.0 (ocg_rule deck data updater)'}
 
 
@@ -79,6 +82,65 @@ def parse_banlist(h):
     return date, out, upd
 
 
+def build_meta(rows):
+    """yugiohmeta 덱 유형별 채용률 → data/meta.json"""
+    by_pass = {}
+    for r in rows.values():
+        if r[10]:
+            by_pass.setdefault(str(r[10]), r[0])
+    # yugiohmeta 카드 id → KONAMI 카드 ID (패스코드 경유)
+    ym2kid, page = {}, 1
+    while True:
+        part = json.loads(get(f'{YM}/cards?limit=3000&page={page}', timeout=180))
+        for c in part:
+            k = by_pass.get(str(c.get('konamiID') or '').lstrip('0') or '-') or by_pass.get(str(c.get('konamiID') or ''))
+            if k:
+                ym2kid[c['_id']] = k
+        if len(part) < 3000:
+            break
+        page += 1
+    types = json.loads(get(f'{YM}/deck-types?limit=1000', timeout=180))
+    decks = []
+    for t in types:
+        out = {'name': t.get('name'), 'cover': ym2kid.get(t.get('card'))}
+        for key, tag in (('deckBreakdownOCG', 'ocg'), ('deckBreakdownTCG', 'tcg')):
+            b = t.get(key) or {}
+            if not b.get('total'):
+                continue
+            cards = []
+            for e in b.get('cards') or []:
+                k = ym2kid.get(e.get('card'))
+                if k:
+                    cards.append([k, round(e.get('per') or 0, 1), round(e.get('avgAt') or 0, 2), e.get('at') or 0])
+            side = []
+            for e in b.get('sideCards') or []:
+                k = ym2kid.get(e.get('card'))
+                if k:
+                    side.append([k, round(e.get('per') or 0, 1), round(e.get('avgAt') or 0, 2), e.get('at') or 0])
+            out[tag] = {'total': b['total'], 'avgMain': b.get('avgMainSize'), 'cards': cards, 'side': side}
+        if out.get('ocg') or out.get('tcg'):
+            decks.append(out)
+    # 여러 덱 유형에서 쓰는 범용 카드 (OCG 통계 우선)
+    use = {}
+    for d in decks:
+        b = d.get('ocg') or d.get('tcg')
+        for k, per, avg, at in b['cards']:
+            if per >= 40:
+                u = use.setdefault(k, [0, 0.0])
+                u[0] += 1
+                u[1] += per
+    extra_p = {11, 19, 18, 23}
+    gen_main, gen_extra = [], []
+    for k, (n, s) in use.items():
+        r = rows.get(k)
+        if not r or n < 4:
+            continue
+        (gen_extra if r[2] == 'monster' and extra_p & set(r[4] or []) else gen_main).append([k, n, round(s / n, 1)])
+    gen_main.sort(key=lambda x: (-x[1], -x[2]))
+    gen_extra.sort(key=lambda x: (-x[1], -x[2]))
+    return {'source': 'https://www.yugiohmeta.com', 'decks': decks, 'genericMain': gen_main[:80], 'genericExtra': gen_extra[:80]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--seed', help='카드 덤프 jsonl (kid, ko 필드)')
@@ -134,7 +196,19 @@ def main():
                   open(cpath, 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
     print('cards.json', len(cards), os.path.getsize(cpath) // 1024, 'KB')
 
-    # 3) 리미트 레귤레이션 (공식)
+    # 3) 대회 덱 통계 (yugiohmeta)
+    mpath = os.path.join(DATA, 'meta.json')
+    try:
+        meta = build_meta(rows)
+        old = json.load(open(mpath, encoding='utf-8')) if os.path.exists(mpath) else {}
+        if {k: v for k, v in old.items() if k != 'updated'} != json.loads(json.dumps(meta, ensure_ascii=False)):
+            meta['updated'] = time.strftime('%Y-%m-%d')
+            json.dump(meta, open(mpath, 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
+        print('meta.json 덱 유형', len(meta['decks']), 'OCG', sum(1 for d in meta['decks'] if d.get('ocg')), '범용 메인', len(meta['genericMain']), '범용 엑스트라', len(meta['genericExtra']))
+    except Exception as e:
+        print('yugiohmeta 실패 (기존 값 유지):', e)
+
+    # 4) 리미트 레귤레이션 (공식)
     bl = {k: v for k, v in (json.load(open(bpath, encoding='utf-8')) if os.path.exists(bpath) else {}).items() if k not in ('fetched', 'checked')}
     for loc, label in (('ko', '한국 OCG'), ('ja', '일본 OCG')):
         try:
