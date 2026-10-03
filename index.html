@@ -1795,7 +1795,13 @@
       const hasM = /몬스터/.test(obj), hasST = /마법|함정/.test(obj);
       return { mode: 'apply', ascope: hasM && !hasST ? 'monster' : (hasST && !hasM ? 'st' : 'any'), aopp: /상대가 발동한/.test(sent) };
     }
-    if (/발동할 수 없|무효화된다|무효로 한다|무효가 된다/.test(t) && !/대신에/.test(t)) return Object.assign({ mode: 'cont' }, guessCont(t));
+    if (/발동할 수 없|무효화된다|무효로 한다|무효가 된다/.test(t) && !/대신에/.test(t)) {
+      // 「소환 성공시에 ~발동할 수 없다」(오벨리스크의 거신병②)는 그 순간만, 「이 카드가 공격할 경우 ~」는 배틀 페이즈 중에만
+      const sent = normOld(t.split(/[.。]/).find(x => /발동할 수 없|무효/.test(x)) || t);
+      const onlySummon = /소환\s*(?:에\s*)?성공(?:시|했을|한 경우|한 때)/.test(sent);
+      const battleOnly = !onlySummon && /공격할 경우|공격하는 경우|공격한 경우|전투를 실행하는|전투를 실행할|데미지 스텝 종료시까지|공격 선언시/.test(sent);
+      return Object.assign({ mode: 'cont', onlySummon, battleOnly }, guessCont(t));
+    }
     return { mode: 'note' };
   }
   // 카드의 「체인 블록을 만들지 않는 효과」 하나하나를 텍스트·공식 FAQ로 판별하고, 사용자가 고친 값(o.fx[i])을 덮어쓴다
@@ -1808,6 +1814,8 @@
   const allFx = (vo) => CH.out.flatMap((o, k) => (vo && vo[k] && vo[k].err.length) ? [] : fxList(o));
   function setFx(o, i, patch) { o.fx = o.fx || {}; o.fx[i] = Object.assign({}, o.fx[i], patch); }
   function contApplies(o, l, mode) {
+    if (o.onlySummon && !(CH.ev.type === 'summoned' && CH.ev.kid === o.kid)) return false;
+    if (o.battleOnly && CH.phase !== 'battle' && !CH.dmg) return false;
     if (!o.m || !l.m || o.mode !== 'cont' || !o[mode]) return false;
     if (o.kid === l.kid && o.ctrl === l.ctrl) return false;   // 「이 카드 이외」
     const cls = classify(l.m), e = linkEff(l);
@@ -2014,8 +2022,10 @@
       if (e.isAct && cls.kind === 'spell' && cls.ss === 1 && !mine) r.err.push('일반·지속·장착·필드·의식 마법은 자신 턴의 메인 페이즈에만 발동할 수 있습니다.');
       if (e.isAct && b.property === 'quickplay' && !mine && !l.wasSet) r.err.push('상대 턴에는 패의 속공 마법을 발동할 수 없습니다. 이전 턴까지 세트해 둔 카드라면 「미리 세트됨」을 체크하세요.');
       if (cls.kind === 'monster' && e.kind === 'ignition' && !mine) r.err.push('기동 효과는 자신의 메인 페이즈에만 발동할 수 있습니다.');
-      if (/(?<!\/\s*)상대(?:의)? (?:턴|메인 페이즈|배틀 페이즈)에(?!도)/.test(e.text) && mine) r.err.push('상대 턴에만 발동할 수 있는 효과입니다.');
-      if (/자신(?:의)? (?:턴|메인 페이즈|배틀 페이즈)에(?!도)/.test(e.text) && !/자신\s*\/\s*상대/.test(e.text) && !mine) r.err.push('자신 턴에만 발동할 수 있는 효과입니다.');
+      // 발동 조건 부분(「발동할 수 있다」 앞)만 본다: 처리 문구의 「상대 턴에서 세어서」 등은 제외
+      const condHead = normOld(((e.text.replace(/^[①-⑳]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '').split(/[.。]/).pop());
+      if (/(?<!\/\s*)상대(?:의)? (?:턴|메인 페이즈|배틀 페이즈)(?:에|중에)(?![도서])/.test(condHead) && !/자신\s*\/\s*상대|자신이나 상대|자신 또는 상대/.test(condHead) && mine) r.err.push('상대 턴에만 발동할 수 있는 효과입니다.');
+      if (/자신(?:의)? (?:턴|메인 페이즈|배틀 페이즈)(?:에|중에)(?![도서])/.test(condHead) && !/자신\s*\/\s*상대|자신이나 상대|자신 또는 상대/.test(condHead) && !mine) r.err.push('자신 턴에만 발동할 수 있는 효과입니다.');
       if (l.setTurn && e.isAct && (cls.kind === 'trap' || b.property === 'quickplay')) {
         if (/세트한 턴에도|セットしたターンでも|the turn it was Set/i.test(Object.values(l.m.text).join(' '))) r.info.push('「세트한 턴에도 발동할 수 있다」 조건이 있는 카드입니다. 조건을 만족했는지 확인하세요.');
         else r.err.push('이번 턴에 세트한 함정·속공 마법은 발동할 수 없습니다.');
@@ -2046,6 +2056,38 @@
       if (CH.dmg && e.dmgOK === false) r.err.push('공식 FAQ: 이 효과는 데미지 스텝에는 발동할 수 없습니다.');
       else if (CH.dmg && e.dmgOK !== true && !(ss === 3 || e.kind === 'trigger' || DMG_OK.test(e.text)))
         r.err.push('데미지 스텝 중에는 카운터 함정, 공격력·수비력을 직접 변동시키는 효과, 발동을 무효로 하는 효과, 데미지 스텝 발동이 명시된 효과만 발동할 수 있습니다.');
+
+      // 4-0. 코스트로 고른 카드의 조건 / 대신 릴리스
+      {
+        const c = costSpec(e), board = boardItems();
+        if (c && !c.self && (l.costB || []).length) {
+          const cc = costCond(e);
+          for (const id of l.costB) {
+            const b = board.find(x => x.id === id); if (!b) continue;
+            const why = costCondWhy(cc, b);
+            if (why) r.err.push(`코스트 조건(${cc.text} 몬스터)에 맞지 않습니다: 「${nameOf(b.m)}」은(는) ${why}.${b.ctrl !== l.ctrl ? ' 대신 릴리스하는 상대 몬스터도 그 코스트의 조건을 만족해야 합니다 (공식 Q&A #21787).' : ''}`);
+          }
+          const opp = l.costB.map(id => board.find(x => x.id === id)).filter(b => b && b.ctrl !== l.ctrl);
+          if (opp.length) {
+            const subs = c.type === 'release' && c.zone === 'field' ? releaseSubst(l.ctrl).filter(x => !x.name || nameOf(l.m).includes(x.name)) : [];
+            if (!subs.length) r.err.push(c.type === 'release'
+              ? '상대 몬스터는 코스트로 릴리스할 수 없습니다. 「암흑세계－섀도우 디스토피아－」②처럼 대신 릴리스하게 해 주는 효과가 자신 필드에 앞면으로 있어야 합니다.'
+              : '상대의 카드는 이 코스트로 쓸 수 없습니다.');
+            else {
+              const sx = subs[0], tag = `「${nameOf(sx.b.m)}」의 ${sx.e.label}`;
+              if (opp.length > 1) r.err.push(`${tag}로 대신 릴리스할 수 있는 상대 몬스터는 한 번에 1장뿐입니다 (공식 Q&A #21790).`);
+              for (const b of opp) {
+                if (b.loc !== 'field') r.err.push(`「${nameOf(b.m)}」은(는) 뒷면 표시라 ${tag}로 릴리스할 수 없습니다 (상대 몬스터 존의 앞면 표시 몬스터에 적용).`);
+                const A = attrOf(b), wantA = (sx.opp.match(/(어둠|빛|땅|물|화염|바람|신) 속성/) || [])[1];
+                if (wantA && A.a !== wantA) r.err.push(`「${nameOf(b.m)}」은(는) ${A.a} 속성이라 ${tag}로 릴리스할 수 없습니다 (${wantA} 속성만).`);
+                if (/앞면 표시/.test(sx.opp) && b.loc !== 'field') r.err.push(`「${nameOf(b.m)}」은(는) 앞면 표시가 아닙니다.`);
+              }
+              if (sx.once && CH.links.slice(0, i).some(x => x.m && substUsed(x, board))) r.err.push(`${tag}는 1턴에 1번만 적용할 수 있습니다. 이 체인에서 이미 적용했습니다.`);
+              r.info.push(`${tag}를 적용해 상대 몬스터를 대신 릴리스합니다. 그 몬스터는 「상대에 의해」 릴리스되어 묘지로 보내진 것으로 취급하지만, 코스트이므로 「효과로 묘지로 보내진」 것은 아닙니다 (공식 Q&A #21812 · #23432).`);
+            }
+          }
+        }
+      }
 
       // 4-1. 「상대가 몬스터를 특수 소환할 시기에」처럼 소환 자체에만 대응하는 효과 (「~가 발동했을 때」 문구 없음)
       {
@@ -2262,6 +2304,62 @@
     if (m) return { self: false, zone: 'field', n: +m[1], type: 'gy' };
     return null;
   }
+  // 「자신이 카드의 효과를 발동하기 위해 자신 필드의 몬스터를 릴리스할 경우, 자신 필드의 몬스터 1장 대신에 상대 필드의 ○○ 몬스터 1장을 릴리스할 수 있다」
+  // (암흑세계－섀도우 디스토피아－②, 육화콩콩② 등) 필드에 앞면으로 있을 때만 적용
+  function releaseSubst(ctrl) {
+    const out = [];
+    for (const b of boardItems()) {
+      if (b.loc !== 'field' || !b.out || (ctrl && b.ctrl !== ctrl)) continue;
+      for (const e of nochainOf(b.m)) {
+        const t = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '');
+        const mm = t.match(/(?:"([^"]+)" )?카드의 효과를 발동하기 위해 자신 필드의 ([^.。]*?)몬스터를 릴리스할 경우, 자신 필드의 [^.。]*?몬스터 1장 대신에 상대 필드의 ([^.。]*?)몬스터 1장을 릴리스할 수 있다/);
+        if (mm) out.push({ b, e, ctrl: b.ctrl, name: mm[1] || null, own: mm[2].trim(), opp: mm[3].trim(), once: /1턴에 1번/.test(t) });
+      }
+    }
+    return out;
+  }
+  // 몬스터의 속성 (「필드의 앞면 표시 몬스터는 어둠 속성이 된다」 같은 효과 반영)
+  function attrOf(b) {
+    if (b.loc === 'field') for (const o of boardItems()) {
+      if (o.loc !== 'field' || !o.out) continue;
+      for (const e of nochainOf(o.m)) { const mm = e.text.match(/필드의 앞면 표시 몬스터는 (어둠|빛|땅|물|화염|바람|신) 속성이 된다/); if (mm) return { a: mm[1], by: o }; }
+    }
+    return { a: ATTR_KO[b.m.base.attribute] || '', by: null };
+  }
+  // 릴리스·묘지로 보내는 코스트 몬스터의 조건 (「공격력 3000 이하의 어둠 속성 몬스터」)
+  function costCond(e) {
+    const body = String(e && e.text || '').replace(/^[\u2460-\u2473]\s*[:：]\s*/, '');
+    const sent = ((body.match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '').split(/[.。]/).pop();
+    const mm = sent.match(/필드의\s*([^,，]*?)몬스터\s*(?:\d+장)?(?:을|를)?\s*(?:릴리스하고|묘지로 보내고)/);
+    if (!mm) return null;
+    const o = mm[1];
+    return {
+      text: o.trim(), attr: (o.match(/(어둠|빛|땅|물|화염|바람|신) 속성/) || [])[1] || null,
+      atkMax: +((o.match(/공격력\s*(\d+)\s*이하/) || [])[1] || NaN), atkMin: +((o.match(/공격력\s*(\d+)\s*이상/) || [])[1] || NaN),
+      race: ((o.replace(/(어둠|빛|땅|물|화염|바람|신) 속성/g, '').match(/([가-힣]+)족/) || [])[1]) || null,
+      lvMax: +((o.match(/레벨\s*(\d+)\s*이하/) || [])[1] || NaN), lvMin: +((o.match(/레벨\s*(\d+)\s*이상/) || [])[1] || NaN),
+      name: (o.match(/"([^"]+)"/) || [])[1] || null, faceup: /앞면 표시/.test(o)
+    };
+  }
+  function costCondWhy(cc, b) {
+    if (!cc) return null;
+    if (classify(b.m).kind !== 'monster') return '몬스터가 아닙니다';
+    const props = (b.m.base.properties || []).map(c => PROP[c]).filter(Boolean);
+    const race = ((props.find(p => p[0] === 'race') || [])[1] || '').replace(/족$/, '');
+    const atk = Number(b.m.base.atk), lv = Number(b.m.base.level);
+    if (cc.attr) { const A = attrOf(b); if (A.a && A.a !== cc.attr) return `${A.a} 속성입니다 (${cc.attr} 속성만)`; }
+    if (!isNaN(cc.atkMax) && b.loc === 'field' && atk > cc.atkMax) return `공격력 ${atk}입니다 (${cc.atkMax} 이하만)`;
+    if (!isNaN(cc.atkMin) && b.loc === 'field' && atk < cc.atkMin) return `공격력 ${atk}입니다 (${cc.atkMin} 이상만)`;
+    if (cc.race && race && race !== cc.race) return `${race}족입니다 (${cc.race}족만)`;
+    if (!isNaN(cc.lvMax) && lv > cc.lvMax) return `레벨 ${lv}입니다 (${cc.lvMax} 이하만)`;
+    if (!isNaN(cc.lvMin) && lv < cc.lvMin) return `레벨 ${lv}입니다 (${cc.lvMin} 이상만)`;
+    if (cc.name && !(nameOf(b.m).includes(cc.name) || (b.m.name.ja || '').includes(cc.name))) return `「${cc.name}」 카드가 아닙니다`;
+    if (cc.faceup && b.loc === 'set') return '뒷면 표시입니다 (앞면 표시만)';
+    return null;
+  }
+  // 이 체인 카드가 대신 릴리스 효과로 상대 몬스터를 릴리스했는지
+  const substUsed = (l, board) => (l.costB || []).some(id => { const b = board.find(x => x.id === id); return b && b.ctrl !== l.ctrl; });
+
   const linkOnField = (l) => zoneG(linkActZone(l)) === 'field';
   // 필드(와 묘지)에 있는 카드: 「필드의 카드」 칸 + 필드에서 발동한 체인의 카드
   function boardItems() {
@@ -2364,7 +2462,9 @@
           board.set(b.id, b); moved.push(b);
         });
       }
-      moved.forEach(b => events.push({ id: b.id, b, type: c.type, pos: 0, i, cost: true, fromField: !b.costed && !String(b.id).startsWith('K') && zoneG(b._from || 'field') === 'field' }));
+      moved.forEach(b => events.push({ id: b.id, b, type: c.type, pos: 0, i, cost: true, by: l.ctrl, fromField: !b.costed && !String(b.id).startsWith('K') && zoneG(b._from || 'field') === 'field' }));
+      const oppMoved = moved.filter(b => b.ctrl !== l.ctrl);
+      if (oppMoved.length) { const sx = releaseSubst(l.ctrl)[0]; if (sx) st[i].notes.push(`「${nameOf(sx.b.m)}」의 ${sx.e.label}로 자신 몬스터 대신에 상대의 ${oppMoved.map(b => '「' + nameOf(b.m) + '」').join('·')}을(를) 릴리스했습니다.`); }
       if (moved.length) st[i].notes.push(`발동할 때 코스트로 ${moved.map(b => '「' + nameOf(b.m) + '」').join('·')}을(를) ${{ banish: '제외했습니다', discard: '버렸습니다', release: '릴리스했습니다', deck: '덱으로 되돌렸습니다' }[c.type] || '묘지로 보냈습니다'}.`);
     });
     let pos = 0;
@@ -2411,7 +2511,7 @@
             const b = { id: 'M' + l.uid + '_' + n, m, kid, ctrl: /상대(?:의)? 패|상대의 덱|상대 덱/.test(act.obj || '') ? (l.ctrl === 'me' ? 'opp' : 'me') : l.ctrl, loc: LOC_AFTER[act.type], from: act.from };
             board.set(b.id, b); return b;
           }).filter(Boolean);
-          moved.forEach(b => events.push({ id: b.id, b, type: act.type, pos, i, then: act.then, fromField: false, from: act.from }));
+          moved.forEach(b => events.push({ id: b.id, b, type: act.type, pos, i, then: act.then, fromField: false, from: act.from, by: l.ctrl }));
           if (moved.length) S.notes.push(`${moved.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${FROM_KO[act.from]}에서 ${{ gy: '묘지로 보내집니다', banish: '제외됩니다', search: '패에 넣어집니다', discard: '버려집니다', destroy: '파괴되어 묘지로 보내집니다', hand: '패에 넣어집니다' }[act.type] || ACT_KO[act.type]}.`);
           else S.notes.push(`${FROM_KO[act.from]}에서 ${ACT_KO[act.type]}하는 카드를 체인 카드에 넣으면, 그 카드의 유발 효과(「묘지로 보내졌을 경우」 등)와 타이밍 놓침을 계산합니다.`);
         }
@@ -2469,7 +2569,7 @@
             const b = board.get(id);
             if (act.type === 'control') { if (b.ctrl === l.ctrl) return; b.ctrl = l.ctrl; }
             else b.loc = LOC_AFTER[act.type];
-            events.push({ id, b, type: act.type, pos, i, then: act.then, fromField: true });
+            events.push({ id, b, type: act.type, pos, i, then: act.then, fromField: true, by: l.ctrl });
           });
           const DONE_KO = { control: `${b2side(l.ctrl)} 컨트롤이 됩니다`, facedown: '뒷면 수비 표시가 됩니다', search: '패에 넣어집니다', discard: '버려집니다', destroy: '파괴되어 묘지로 보내집니다', banish: '제외됩니다', hand: '패로 되돌아갑니다', deck: act.extra ? '엑스트라 덱으로 되돌아갑니다' : '덱으로 되돌아갑니다', gy: '묘지로 보내집니다' };
           if (gone.length) S.notes.push(`${gone.map(id => '「' + nameOf(board.get(id).m) + '」').join('·')}: ${DONE_KO[act.type]}.`);
@@ -2537,6 +2637,10 @@
   const normOld = (t) => String(t || '').replace(/필드 위/g, '필드').replace(/전투에 의해서?/g, '전투로').replace(/효과에 의해서?/g, '효과로').replace(/제물로 바치/g, '릴리스하').replace(/제물/g, '릴리스').replace(/스텐바이/g, '스탠바이').replace(/게임에서 제외/g, '제외').replace(/라이프 포인트/g, 'LP').replace(/엔드 페이즈시/g, '엔드 페이즈에').replace(/스탠바이 페이즈시/g, '스탠바이 페이즈에');
   function evMatches(cond, type, evn) {
     cond = normOld(cond);
+    // 코스트로 이동한 카드는 「효과로 ~되었을」 조건을 만족하지 않음 (공식 Q&A #23432)
+    if (evn && evn.cost && /효과로 (?:묘지로|파괴|제외|패로|덱으로)|효과로 [^.。]*?(?:보내졌을|되었을|됐을)/.test(cond)) return false;
+    // 「상대에 의해 / 상대의 효과로」: 그 카드를 보낸 플레이어가 상대여야 함
+    if (evn && evn.by && evn.b && /상대에 의해|상대의 (?:카드의 )?효과로|상대가 발동한 효과로/.test(cond) && evn.by === evn.b.ctrl) return false;
     // 출발 위치를 지정한 조건 (「덱에서 묘지로 보내졌을」「필드에서 묘지로」「패에서 버려졌을」)
     if (evn && type !== 'summon') {
       const want = /엑스트라 덱에서/.test(cond) ? 'extra' : (/덱에서/.test(cond) ? 'deck' : (/패에서/.test(cond) ? 'hand' : (/필드에서|필드의|몬스터 존에서|앞면 표시의/.test(cond) ? 'field' : null)));
@@ -2843,12 +2947,24 @@
     const zoneKo = { field: '자신 필드', '패': '패', '덱': '덱', '엑스트라 덱': '엑스트라 덱', '묘지': '묘지' }[c.zone] || c.zone;
     let chips = '';
     const czone = { field: 'field', '묘지': 'gy', '패': 'hand', '제외': 'banished' }[c.zone];
-    if (czone) chips = boardItems().filter(b => zoneG(b.loc) === czone && b.ctrl === l.ctrl && b.id !== 'L' + l.uid && b.link !== l)
-      .map(b => `<button data-act="costB" data-uid="${l.uid}" data-id="${b.id}" class="rounded-full px-2 py-1 text-[11px] font-bold border ${(l.costB || []).includes(b.id) ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-700 text-slate-300 bg-slate-800/80'}">${esc(nameOf(b.m))}</button>`).join('');
+    const cc = costCond(e);
+    const chip = (b, extra) => { const why = costCondWhy(cc, b); return `<button data-act="costB" data-uid="${l.uid}" data-id="${b.id}" title="${esc(why || '')}" class="rounded-full px-2 py-1 text-[11px] font-bold border ${(l.costB || []).includes(b.id) ? 'bg-amber-500 border-amber-500 text-ink-900' : (why ? 'border-slate-800 text-slate-600 bg-slate-900/60 line-through' : 'border-slate-700 text-slate-300 bg-slate-800/80')}">${esc(nameOf(b.m))}${extra || ''}</button>`; };
+    const board = boardItems();
+    if (czone) chips = board.filter(b => zoneG(b.loc) === czone && b.ctrl === l.ctrl && b.id !== 'L' + l.uid && b.link !== l && (c.type !== 'release' || classify(b.m).kind === 'monster')).map(b => chip(b)).join('');
+    let substNote = '';
+    if (c.type === 'release' && czone === 'field') {
+      const subs = releaseSubst(l.ctrl).filter(x => !x.name || nameOf(l.m).includes(x.name));
+      if (subs.length) {
+        const sx = subs[0];
+        const opp = board.filter(b => b.ctrl !== l.ctrl && b.loc === 'field' && classify(b.m).kind === 'monster');
+        chips += opp.map(b => chip(b, ` <span class="text-[10px] ${(l.costB || []).includes(b.id) ? '' : 'text-rose-300'}">상대 · 대신</span>`)).join('');
+        substNote = `<p class="text-[11px] text-violet-300 mt-1 break-keep"><i class="fa-solid fa-right-left mr-1"></i>「${esc(nameOf(sx.b.m))}」의 ${esc(sx.e.label)}: 자신 필드의 몬스터 1장 대신에 상대 필드의 ${esc(sx.opp)}몬스터 1장을 릴리스할 수 있습니다${sx.once ? ' (1턴에 1번)' : ''}.</p>`;
+      }
+    }
     chips += (l.costK || []).map((kid, n) => `<button data-act="costDel" data-uid="${l.uid}" data-n="${n}" class="rounded-full px-2 py-1 text-[11px] font-bold border bg-amber-500 border-amber-500 text-ink-900">${esc(cardName(kid))} <i class="fa-solid fa-xmark ml-0.5"></i></button>`).join('');
     const input = c.zone === 'field' ? '' : `<input data-act="costAdd" data-uid="${l.uid}" type="search" autocomplete="off" spellcheck="false" placeholder="코스트로 보낸 카드 (선택 · 이름/초성)" class="w-full ${SEL} py-1.5 mt-1"><div id="costRes-${l.uid}" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div>`;
-    return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}코스트: ${zoneKo}의 카드 ${c.n}장을 ${COST_KO[c.type]} (발동할 때) · 보낸 카드를 넣으면 그 카드의 유발 효과와 타이밍 놓침을 계산합니다</div>
-      ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : ''}${input}</div>`;
+    return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}코스트: ${zoneKo}의 ${cc && cc.text ? esc(cc.text) + ' 몬스터' : '카드'} ${c.n}장을 ${COST_KO[c.type]} (발동할 때) · 보낸 카드를 넣으면 그 카드의 유발 효과와 타이밍 놓침을 계산합니다</div>
+      ${substNote}${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : ''}${input}</div>`;
   }
 
   function movePicker(l, e) {
