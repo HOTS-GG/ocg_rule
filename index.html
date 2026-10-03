@@ -184,6 +184,9 @@
     <div id="allSentinel" class="h-10 flex items-center justify-center text-xs text-slate-600"></div>
   </section>
 
+  <!-- 덱 빌더 -->
+  <section id="viewDeck" class="hidden"></section>
+
   <!-- 룰 참조 -->
   <section id="viewRules" class="hidden">
     <div class="mb-3 px-1">
@@ -196,13 +199,16 @@
 
 <!-- ================= BOTTOM NAV ================= -->
 <nav class="safe-bottom fixed bottom-0 left-0 right-0 z-40 bg-ink-900/95 backdrop-blur border-t border-slate-800">
-  <div class="max-w-2xl mx-auto grid grid-cols-4">
+  <div class="max-w-2xl mx-auto grid grid-cols-5">
     <button data-view="search" class="navBtn py-2.5 flex flex-col items-center gap-0.5 text-amber-400">
       <i class="fa-solid fa-magnifying-glass text-lg"></i><span class="text-[11px] font-bold">카드 검색</span>
     </button>
     <button data-view="chain" class="navBtn py-2.5 flex flex-col items-center gap-0.5 text-slate-400 relative">
       <i class="fa-solid fa-link text-lg"></i><span class="text-[11px] font-bold">체인</span>
       <span id="chainBadge" class="hidden absolute top-1 right-[calc(50%-22px)] min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-ink-900 text-[10px] font-black leading-4 text-center"></span>
+    </button>
+    <button data-view="deck" class="navBtn py-2.5 flex flex-col items-center gap-0.5 text-slate-400">
+      <i class="fa-solid fa-box-archive text-lg"></i><span class="text-[11px] font-bold">덱</span>
     </button>
     <button data-view="all" class="navBtn py-2.5 flex flex-col items-center gap-0.5 text-slate-400">
       <i class="fa-solid fa-layer-group text-lg"></i><span class="text-[11px] font-bold">전체 카드</span>
@@ -1078,7 +1084,10 @@
       </div>
 
       <div class="px-3 pb-3">
-        <button id="btnAddChain" class="w-full rounded-xl bg-slate-100 text-ink-900 font-extrabold text-sm py-2.5 active:scale-[.99]"><i class="fa-solid fa-link mr-1.5"></i>체인에 추가 (체인 ${CH.links.length + 1})</button>
+        <div class="grid grid-cols-2 gap-2">
+          <button id="btnAddChain" class="w-full rounded-xl bg-slate-100 text-ink-900 font-extrabold text-sm py-2.5 active:scale-[.99]"><i class="fa-solid fa-link mr-1.5"></i>체인에 추가 (체인 ${CH.links.length + 1})</button>
+          <button id="btnAddDeck" class="w-full rounded-xl border border-slate-600 text-slate-100 font-extrabold text-sm py-2.5 active:scale-[.99]"><i class="fa-solid fa-box-archive mr-1.5"></i>덱에 추가</button>
+        </div>
       </div>
 
       <!-- 효과 텍스트 -->
@@ -1222,6 +1231,7 @@
     else if (h === '#all') { switchView('all'); renderAll(false); }
     else if (h === '#rules') { switchView('rules'); }
     else if (h === '#chain') { switchView('chain'); hydrateChain(); renderChain(); }
+    else if (h === '#deck') { switchView('deck'); renderDeck(); }
     else { switchView('search'); showHome(); }
   }
 
@@ -1231,6 +1241,7 @@
     $('#viewAll').classList.toggle('hidden', v !== 'all');
     $('#viewRules').classList.toggle('hidden', v !== 'rules');
     $('#viewChain').classList.toggle('hidden', v !== 'chain');
+    $('#viewDeck').classList.toggle('hidden', v !== 'deck');
     $$('.navBtn').forEach(b => {
       const on = b.dataset.view === v;
       b.classList.toggle('text-amber-400', on);
@@ -1289,6 +1300,7 @@
     $$('.faqLangBtn').forEach(b => b.addEventListener('click', () => { state.faqLang = b.dataset.flang; renderCurrent(); }));
     $('#hlToggle').addEventListener('change', (e) => { state.hl = e.target.checked; $('#descBox').classList.toggle('hl-off', !state.hl); });
     $('#btnAddChain').addEventListener('click', () => { addToChain(cur.m.kid); go('#chain'); });
+    $('#btnAddDeck').addEventListener('click', async () => { const kid = cur.m.kid; await dkLoad(); if (DK.db && dkAdd(kid, 'deck')) dkSave(); go('#deck'); window.scrollTo({ top: 0 }); });
     bindQa();
   }
 
@@ -4032,6 +4044,553 @@
     </details>`).join('');
 
   // ======================================================================
+  // 덱 빌더 (리미트 레귤레이션 · 자동 구성 · 카드 추천)
+  //  data/cards.json  : 전체 카드의 종류·스탯·한국어 효과 (tools/update_data.py 로 생성, GitHub Actions 로 매일 갱신)
+  //  data/banlist.json: KONAMI 공식 리미트 레귤레이션 (한국 OCG / 일본 OCG)
+  // ======================================================================
+  const DECK_KEY = 'ygo_judge_decks_v1';
+  const DK = { db: null, byKid: new Map(), ban: null, loading: null, err: null, reg: 'ko', decks: [], cur: 0, tab: 'edit',
+    q: '', f: { kind: 'all', attr: '', race: '', text: '', legal: true }, sel: null,
+    auto: { q: '', arch: null, size: 40, ht: 9, generic: true, result: null },
+    reco: { roles: [], q: '', kind: 'all' }, impOpen: false, toast: '' };
+  const EXTRA_P = [11, 19, 18, 23];   // 융합 · 싱크로 · 엑시즈 · 링크
+  const LIM_KO = { 0: '금지', 1: '제한', 2: '준제한' };
+  const ATTR_LIST = ['어둠', '빛', '땅', '물', '화염', '바람', '신'];
+  // 범용 카드 (KONAMI 카드 ID) — 선택한 리미트 레귤레이션에서 쓸 수 있는 것만 사용
+  const STAPLE_HT = [12950, 9455, 13631, 8933, 11708, 9279, 14741, 12070, 6980, 11829];
+  const STAPLE_GEN = [13619, 15299, 14742, 14876, 4678];
+  // 원하는 역할로 찾기
+  const ROLES = [
+    ['handtrap', '패 트랩', (t) => splitEffects(t).concat(splitEffects(t).length ? [] : [t]).some(x => /이 카드를 패에서 (?:버리고|묘지로 보내고)|패에서 이 카드를 (?:버리고|묘지로 보내고)|이 카드를 패에서 특수 소환/.test(x)
+      && /상대(?:의)? (?:턴|메인 페이즈|배틀 페이즈)|자신 \/ 상대(?:의)? 턴|발동했을 때|소환할 (?:때|시기)|공격 선언|특수 소환했을 경우|상대가[^.。]*?했을 (?:때|경우)/.test(x))],
+    ['search', '서치', /덱에서[^.。]*?패에 (?:넣|더)/],
+    ['draw', '드로우', /드로우한다|드로우하고/],
+    ['destroy', '파괴', /파괴한다|파괴하고/],
+    ['banish', '제외', /제외한다|제외하고/],
+    ['negAct', '발동 무효', /발동을 무효/],
+    ['negEff', '효과 무효', /효과를[^.。]*?무효/],
+    ['revive', '묘지 소생', /묘지[^.。]*?특수 소환/],
+    ['deckSS', '덱에서 특수 소환', /덱에서[^.。]*?특수 소환/],
+    ['bounce', '패로 되돌림', /패로 되돌/],
+    ['control', '컨트롤 탈취', /컨트롤을 얻/],
+    ['mill', '덱에서 묘지로', /덱에서[^.。]*?묘지로 보/],
+    ['protect', '내성', /효과로는 파괴되지 않|효과를 받지 않|효과의 대상이 되지 않/],
+    ['burn', '데미지', /데미지를 준다|데미지를 주고/]
+  ];
+
+  const roleHit = (r, t) => r[2] instanceof RegExp ? r[2].test(t) : r[2](t);
+  const dkLim = (kid) => { const L = DK.ban && DK.ban[DK.reg]; const v = L && L.list[String(kid)]; return v === undefined ? 3 : v; };
+  function dkRow(r) {
+    const [kid, name, ct, prop, props, attr, lv, atk, def, link, pass, arch, text] = r;
+    const P = (props || []).map(c => PROP[c]).filter(Boolean);
+    const types = P.filter(p => p[0] === 'type').map(p => p[1]);
+    const race = (P.find(p => p[0] === 'race') || [])[1] || '';
+    const extra = ct === 'monster' && (props || []).some(c => EXTRA_P.includes(c));
+    return { kid, name, ct, prop, props: props || [], types, race, attr: ATTR_KO[attr] || '', lv, atk, def, link, pass, arch, text: text || '', extra,
+      kind: ct === 'monster' ? (extra ? 'extra' : 'monster') : ct, nk: norm(name), cho: chosung(name) };
+  }
+  const dkType = (c) => c.ct === 'spell' ? (SPELL[c.prop] || SPELL.normal).label : c.ct === 'trap' ? (TRAP[c.prop] || TRAP.normal).label
+    : [c.types.filter(t => t !== '효과').join('·') || '효과', c.race, c.attr && c.attr + ' 속성', c.types.includes('링크') ? `LINK-${String(c.link || '').length}` : (c.lv != null ? `${c.types.includes('엑시즈') ? '랭크' : '레벨'} ${c.lv}` : '')].filter(Boolean).join(' · ');
+  const dkImg = (c) => c && c.pass ? `https://images.ygoprodeck.com/images/cards_small/${c.pass}.jpg` : '';
+
+  async function dkLoad() {
+    if (DK.db) return;
+    if (!DK.loading) DK.loading = (async () => {
+      const [c, b] = await Promise.all([getJSON('data/cards.json', 90000), getJSON('data/banlist.json', 30000)]);
+      DK.db = c.cards.map(dkRow); DK.byKid = new Map(DK.db.map(x => [x.kid, x])); DK.updated = c.updated; DK.ban = b;
+      if (!DK.ban[DK.reg]) DK.reg = DK.ban.ko ? 'ko' : 'ja';
+      dkArchIndex();
+    })().catch(e => { DK.err = e; DK.loading = null; });
+    return DK.loading;
+  }
+  function dkLoadDecks() {
+    try { const s = JSON.parse(store.get(DECK_KEY) || 'null'); if (s) { DK.decks = s.decks || []; DK.cur = s.cur || 0; DK.reg = s.reg || 'ko'; } } catch {}
+    if (!DK.decks.length) DK.decks = [dkNew('새 덱')];
+    DK.cur = Math.max(0, Math.min(DK.cur, DK.decks.length - 1));
+  }
+  const dkSave = () => store.set(DECK_KEY, JSON.stringify({ decks: DK.decks, cur: DK.cur, reg: DK.reg }));
+  const dkNew = (name) => ({ id: Date.now() + '' + Math.floor(Math.random() * 1e6), name, main: {}, extra: {}, side: {}, updated: Date.now() });
+  const dkCur = () => DK.decks[DK.cur];
+  const dkCount = (sec) => Object.values(sec).reduce((a, b) => a + b, 0);
+  const dkCopies = (d, kid) => (d.main[kid] || 0) + (d.extra[kid] || 0) + (d.side[kid] || 0);
+  function dkToast(t) { DK.toast = t; renderDeck(); setTimeout(() => { if (DK.toast === t) { DK.toast = ''; renderDeck(); } }, 2600); }
+  function dkAdd(kid, where, d = dkCur(), quiet = false) {
+    const c = DK.byKid.get(kid); if (!c) return false;
+    const L = dkLim(kid), n = dkCopies(d, kid);
+    if (n >= L) { if (!quiet) dkToast(L === 0 ? `「${c.name}」는 ${DK.ban[DK.reg].label} 금지 카드입니다.` : `「${c.name}」는 ${L}장까지 넣을 수 있습니다${L < 3 ? ` (${LIM_KO[L]})` : ''}.`); return false; }
+    const sec = where === 'side' ? d.side : (c.extra ? d.extra : d.main);
+    const cap = where === 'side' ? 15 : (c.extra ? 15 : 60);
+    if (dkCount(sec) >= cap) { if (!quiet) dkToast(`${where === 'side' ? '사이드' : (c.extra ? '엑스트라' : '메인')} 덱은 ${cap}장까지입니다.`); return false; }
+    sec[kid] = (sec[kid] || 0) + 1; d.updated = Date.now();
+    return true;
+  }
+  function dkCheck(d) {
+    const err = [], warn = [];
+    const m = dkCount(d.main), x = dkCount(d.extra), s = dkCount(d.side);
+    if (m < 40) err.push(`메인 덱이 ${m}장입니다. 40장 이상이어야 합니다.`);
+    if (m > 60) err.push(`메인 덱이 ${m}장입니다. 60장 이하여야 합니다.`);
+    if (x > 15) err.push(`엑스트라 덱이 ${x}장입니다. 15장 이하여야 합니다.`);
+    if (s > 15) err.push(`사이드 덱이 ${s}장입니다. 15장 이하여야 합니다.`);
+    const all = new Set([...Object.keys(d.main), ...Object.keys(d.extra), ...Object.keys(d.side)].map(Number));
+    for (const kid of all) {
+      const n = dkCopies(d, kid), L = dkLim(kid), c = DK.byKid.get(kid), nm = c ? c.name : '#' + kid;
+      if (L === 0) err.push(`「${nm}」는 금지 카드입니다 (${n}장).`);
+      else if (n > L) err.push(`「${nm}」는 ${L}장까지 넣을 수 있습니다${L < 3 ? ` (${LIM_KO[L]})` : ''}. 메인·엑스트라·사이드 합계 ${n}장입니다.`);
+      if (c && c.extra && d.main[kid]) err.push(`「${nm}」는 엑스트라 덱 몬스터라 메인 덱에 넣을 수 없습니다.`);
+      if (c && !c.extra && d.extra[kid]) err.push(`「${nm}」는 엑스트라 덱에 넣을 수 없습니다.`);
+      if (!c) warn.push(`카드 데이터에 없는 카드가 있습니다 (#${kid}).`);
+    }
+    return { err, warn, m, x, s };
+  }
+  // 첫 패에 1장 이상 올 확률 (초기 패 h장, 덱 N장, 그 카드 k장)
+  function dkProb(N, k, h) {
+    if (k <= 0) return 0; if (N - k < h) return 1;
+    let p = 1; for (let i = 0; i < h; i++) p *= (N - k - i) / (N - i);
+    return 1 - p;
+  }
+
+  // ---------- 테마(아키타입) ----------
+  function dkArchIndex() {
+    const by = new Map();
+    for (const c of DK.db) if (c.arch) { if (!by.has(c.arch)) by.set(c.arch, []); by.get(c.arch).push(c); }
+    DK.arch = [...by.entries()].map(([en, cs]) => ({ en, cards: cs, ko: dkKoLabel(cs) })).filter(a => a.cards.length >= 3);
+  }
+  function dkKoLabel(cs) {
+    // 효과 텍스트에서 「"푸른 눈" 몬스터」처럼 따옴표로 부르는 테마 이름 중, 카드명에 많이 들어 있는 것
+    const q = new Map();
+    for (const c of cs) for (const m of c.text.matchAll(/"([^"]{2,14})"/g)) q.set(m[1], (q.get(m[1]) || 0) + 1);
+    let qb = null, qs = 0;
+    for (const [w] of q) {
+      const cov = cs.filter(c => c.name.includes(w)).length;
+      if (cov >= Math.max(2, Math.ceil(cs.length * 0.3))) { const sc = cov * 10 + Math.min(w.length, 8); if (sc > qs) { qs = sc; qb = w; } }
+    }
+    if (qb) return qb;
+    const cnt = new Map();
+    for (const c of cs) { const w = c.name.split(/[\s－\-·:：]/)[0].replace(/[「」"]/g, ''); if (w.length >= 2) cnt.set(w, (cnt.get(w) || 0) + 1); }
+    let best = null, bn = 0;
+    for (const [w, n] of cnt) if (n > bn) { best = w; bn = n; }
+    return bn >= Math.max(2, Math.ceil(cs.length * 0.3)) ? best : null;
+  }
+  function dkArchFind(q) {
+    const nq = norm(q); if (!nq || !DK.arch) return [];
+    const res = [];
+    for (const a of DK.arch) {
+      let s = -1;
+      if (a.ko && norm(a.ko).includes(nq)) s = norm(a.ko) === nq ? 0 : 1;
+      else if (norm(a.en).includes(nq)) s = 2;
+      else if (a.cards.some(c => c.nk.includes(nq))) s = 3;
+      if (s >= 0) res.push([s, a]);
+    }
+    return res.sort((x, y) => x[0] - y[0] || y[1].cards.length - x[1].cards.length).slice(0, 8).map(x => x[1]);
+  }
+  // 덱에 많이 들어 있는 테마
+  function dkDeckArch(d) {
+    const cnt = new Map();
+    for (const sec of [d.main, d.extra]) for (const [kid, n] of Object.entries(sec)) { const c = DK.byKid.get(+kid); if (c && c.arch) cnt.set(c.arch, (cnt.get(c.arch) || 0) + n); }
+    return [...cnt.entries()].sort((a, b) => b[1] - a[1]).map(([en, n]) => ({ a: DK.arch.find(x => x.en === en), n })).filter(x => x.a);
+  }
+
+  // ---------- 자동 구성 ----------
+  function dkAutoBuild(arch, opt) {
+    const label = arch.ko, quoted = label ? `"${label}"` : null;
+    const members = new Set(arch.cards.map(c => c.kid));
+    const maxKid = DK.db[DK.db.length - 1].kid;
+    const inTheme = (c) => members.has(c.kid) || (label && c.name.includes(label)) || (quoted && c.text.includes(quoted));
+    const pool = DK.db.filter(c => dkLim(c.kid) > 0 && inTheme(c));
+    const why = new Map();
+    const score = (c) => {
+      const t = c.text, r = [];
+      let s = members.has(c.kid) || (label && c.name.includes(label)) ? 10 : 6;
+      r.push(s === 10 ? '테마 카드' : '테마를 지원하는 카드');
+      if (quoted && t.includes(quoted) && /덱에서[^.。]*?(?:패에 (?:넣|더)|특수 소환)/.test(t)) { s += 5; r.push('테마 카드를 덱에서 서치·특수 소환'); }
+      else if (/덱에서[^.。]*?(?:패에 (?:넣|더)|특수 소환)/.test(t)) { s += 2; r.push('덱에서 카드를 가져옴'); }
+      if (/(?:패|묘지)에서 (?:이 카드를 )?특수 소환/.test(t) || /이 카드를 (?:패|묘지)에서 특수 소환/.test(t)) { s += 1.5; r.push('스스로 특수 소환'); }
+      if (c.types.includes('일반') && !c.types.includes('효과')) { s -= 4; r.push('일반 몬스터'); }
+      if (/통상 소환할 수 없다/.test(t)) { s -= 2; r.push('특수 소환 전용 몬스터'); }
+      if (/이 카드명의 카드는 1턴에 1장밖에 발동할 수 없다|이 카드명의 효과는 1턴에 1번/.test(t)) s -= 0.5;
+      s += (c.kid / maxKid) * 3;
+      why.set(c.kid, r);
+      return s;
+    };
+    const main = pool.filter(c => !c.extra).map(c => [c, score(c)]).sort((a, b) => b[1] - a[1]);
+    const extra = pool.filter(c => c.extra).map(c => [c, score(c)]).sort((a, b) => b[1] - a[1]);
+    const deck = dkNew(`${label || arch.en} (자동 구성)`);
+    const log = [];
+    const ht = STAPLE_HT.filter(k => DK.byKid.has(k) && dkLim(k) > 0);
+    const gen = STAPLE_GEN.filter(k => DK.byKid.has(k) && dkLim(k) > 0);
+    const htN = Math.min(opt.ht, ht.reduce((a, k) => a + Math.min(3, dkLim(k)), 0));
+    const genN = opt.generic ? Math.min(3, gen.reduce((a, k) => a + Math.min(3, dkLim(k)), 0)) : 0;
+    const themeTarget = Math.max(0, opt.size - htN - genN);
+    // 1차: 점수에 따라 1~3장
+    let n = 0;
+    for (const [c, s] of main) {
+      if (n >= themeTarget) break;
+      const want = Math.min(dkLim(c.kid), s >= 16 ? 3 : s >= 12.5 ? 2 : 1, themeTarget - n);
+      for (let i = 0; i < want; i++) if (dkAdd(c.kid, 'deck', deck, true)) n++;
+    }
+    // 2차: 테마 카드가 모자라면 상위 카드를 더 넣음
+    for (const [c] of main) { while (n < themeTarget && dkCopies(deck, c.kid) < Math.min(3, dkLim(c.kid)) && dkAdd(c.kid, 'deck', deck, true)) n++; }
+    // 패 트랩 · 범용 카드
+    let h = 0;
+    for (const k of ht) { while (h < htN && dkCopies(deck, k) < Math.min(3, dkLim(k)) && dkAdd(k, 'deck', deck, true)) h++; }
+    let g = 0;
+    for (const k of gen) { while (g < genN && dkCopies(deck, k) < Math.min(3, dkLim(k)) && dkAdd(k, 'deck', deck, true)) g++; }
+    // 그래도 모자라면 범용 카드로 채움
+    for (const k of [...ht, ...gen]) { while (dkCount(deck.main) < opt.size && dkCopies(deck, k) < Math.min(3, dkLim(k)) && dkAdd(k, 'deck', deck, true)); }
+    // 엑스트라 덱
+    let x = 0;
+    for (const [c, s] of extra) { if (x >= 15) break; const want = Math.min(dkLim(c.kid), s >= 16 ? 2 : 1, 15 - x); for (let i = 0; i < want; i++) if (dkAdd(c.kid, 'deck', deck, true)) x++; }
+    log.push(`테마 카드 ${n}장 · 패 트랩 ${h}장 · 범용 카드 ${g}장 · 엑스트라 ${x}장 (${DK.ban[DK.reg].label} ${DK.ban[DK.reg].date} 기준)`);
+    if (n < themeTarget) log.push(`테마 카드가 부족해 ${themeTarget - n}장을 범용 카드로 채웠습니다.`);
+    if (!extra.length) log.push('이 테마에는 엑스트라 덱 몬스터가 없어, 엑스트라 덱은 직접 채워야 합니다.');
+    const top = main.slice(0, 6).map(([c]) => `「${c.name}」(${(why.get(c.kid) || []).slice(0, 2).join(', ')})`);
+    if (top.length) log.push('우선 넣은 카드: ' + top.join(' · '));
+    return { deck, log, arch };
+  }
+
+  // ---------- 카드 추천 ----------
+  function dkRecommend(d) {
+    const inDeck = new Set([...Object.keys(d.main), ...Object.keys(d.extra), ...Object.keys(d.side)].map(Number));
+    if (!inDeck.size) return [];
+    const archs = dkDeckArch(d).slice(0, 3);
+    const deckCards = [...inDeck].map(k => DK.byKid.get(k)).filter(Boolean);
+    const names = deckCards.map(c => c.name).filter(n => n.length >= 2);
+    const attrCnt = new Map(), raceCnt = new Map();
+    for (const c of deckCards) if (c.ct === 'monster') { attrCnt.set(c.attr, (attrCnt.get(c.attr) || 0) + 1); raceCnt.set(c.race, (raceCnt.get(c.race) || 0) + 1); }
+    const topAttr = [...attrCnt.entries()].sort((a, b) => b[1] - a[1])[0], topRace = [...raceCnt.entries()].sort((a, b) => b[1] - a[1])[0];
+    const out = [];
+    for (const c of DK.db) {
+      if (dkLim(c.kid) <= dkCopies(d, c.kid)) continue;
+      let s = 0; const r = [];
+      for (const { a, n } of archs) {
+        if (c.arch === a.en) { s += 6 + Math.min(4, n / 4); r.push(`같은 테마 (${a.ko || a.en})`); break; }
+        if (a.ko && c.text.includes(`"${a.ko}"`)) { s += 5; r.push(`「${a.ko}」 카드를 지원`); break; }
+      }
+      let refs = 0;
+      for (const nm of names) if (refs < 2 && nm !== c.name && c.text.includes(`"${nm}"`)) { refs++; s += 3; r.push(`「${nm}」을(를) 다룸`); }
+      if (deckCards.some(x => x.kid !== c.kid && x.text.includes(`"${c.name}"`))) { s += 4; r.push('덱의 카드가 이 카드를 다룸'); }
+      if (topAttr && topAttr[1] >= 4 && topAttr[0] && c.text.includes(`${topAttr[0]} 속성`)) { s += 1.5; r.push(`${topAttr[0]} 속성 지원`); }
+      if (topRace && topRace[1] >= 4 && topRace[0] && c.text.includes(topRace[0])) { s += 1.5; r.push(`${topRace[0]} 지원`); }
+      if (!s) continue;
+      if (inDeck.has(c.kid)) { s -= 4; r.push(`덱에 ${dkCopies(d, c.kid)}장`); }
+      if (STAPLE_HT.includes(c.kid) || STAPLE_GEN.includes(c.kid)) { s += 0.5; r.push('범용 카드'); }
+      s += c.kid / 1e6;
+      out.push({ c, s, r });
+    }
+    // 아무 테마도 없으면 범용 카드
+    if (!out.length) for (const k of [...STAPLE_HT, ...STAPLE_GEN]) { const c = DK.byKid.get(k); if (c && dkLim(k) > dkCopies(d, k)) out.push({ c, s: 1, r: [STAPLE_HT.includes(k) ? '범용 패 트랩' : '범용 카드'] }); }
+    return out.sort((a, b) => b.s - a.s).slice(0, 40);
+  }
+  function dkRoleSearch(roles, q, kind) {
+    const res = [];
+    const nq = q.trim();
+    const R = ROLES.filter(r => roles.includes(r[0]));
+    for (let i = DK.db.length - 1; i >= 0; i--) {   // 새 카드부터
+      const c = DK.db[i];
+      if (kind !== 'all' && c.kind !== kind) continue;
+      if (dkLim(c.kid) === 0) continue;
+      if (R.length && !R.every(r => roleHit(r, c.text))) continue;
+      if (nq && !c.text.includes(nq) && !c.name.includes(nq)) continue;
+      if (!R.length && !nq) continue;
+      const hit = R.length ? R[0] : null;
+      const sent = c.text.split(/(?<=[.。])\s*/).find(x => (hit && roleHit(hit, x)) || (nq && x.includes(nq))) || '';
+      res.push({ c, sent: sent.slice(0, 120) });
+      if (res.length >= 60) break;
+    }
+    return res;
+  }
+
+  // ---------- 가져오기 / 내보내기 ----------
+  function dkToYdk(d) {
+    const line = (sec) => Object.entries(sec).flatMap(([kid, n]) => { const c = DK.byKid.get(+kid); return c && c.pass ? Array(n).fill(c.pass) : []; });
+    return ['#created by YGO 저지 봇', '#main', ...line(d.main), '#extra', ...line(d.extra), '!side', ...line(d.side)].join('\n') + '\n';
+  }
+  function dkToText(d) {
+    const part = (title, sec) => { const rows = Object.entries(sec).map(([kid, n]) => `${n} ${(DK.byKid.get(+kid) || {}).name || '#' + kid}`); return rows.length ? [`[${title} ${dkCount(sec)}장]`, ...rows].join('\n') : ''; };
+    return [`${d.name}`, part('메인', d.main), part('엑스트라', d.extra), part('사이드', d.side)].filter(Boolean).join('\n\n');
+  }
+  function dkImport(text, name) {
+    const d = dkNew(name || '가져온 덱'), miss = [];
+    const byPass = new Map(DK.db.filter(c => c.pass).map(c => [String(c.pass), c]));
+    const byName = new Map(DK.db.map(c => [c.nk, c]));
+    let sec = 'main';
+    if (/#main|#extra|!side/.test(text)) {
+      for (const raw of text.split(/\r?\n/)) {
+        const t = raw.trim();
+        if (t === '#main') sec = 'main'; else if (t === '#extra') sec = 'extra'; else if (t === '!side') sec = 'side';
+        else if (/^\d+$/.test(t)) { const c = byPass.get(String(+t)); if (c) (d[sec][c.kid] = (d[sec][c.kid] || 0) + 1); else miss.push(t); }
+      }
+    } else {
+      for (const raw of text.split(/\r?\n/)) {
+        const t = raw.trim(); if (!t) continue;
+        if (/사이드|side/i.test(t) && /^\[|^#|:$/.test(t)) { sec = 'side'; continue; }
+        if (/^\[|^#/.test(t)) { sec = 'main'; continue; }
+        const mm = t.match(/^(\d)\s*[x×]?\s*(.+)$/i) || t.match(/^(.+?)\s*[x×]\s*(\d)$/i);
+        const n = mm ? +(mm[1].match(/^\d$/) ? mm[1] : mm[2]) : 1, nm = mm ? (mm[1].match(/^\d$/) ? mm[2] : mm[1]) : t;
+        const c = byName.get(norm(nm)) || DK.db.find(x => x.nk.includes(norm(nm)));
+        if (!c) { miss.push(nm); continue; }
+        const s = sec === 'side' ? 'side' : (c.extra ? 'extra' : 'main');
+        d[s][c.kid] = (d[s][c.kid] || 0) + n;
+      }
+    }
+    return { d, miss };
+  }
+  function dkDownload(name, text) {
+    try {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+      a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    } catch { dkToast('파일로 저장하지 못했습니다. 복사 기능을 쓰세요.'); }
+  }
+
+  // ---------- 화면 ----------
+  const limBadge = (kid) => { const L = dkLim(kid); return L === 3 ? '' : `<span class="flex-none text-[10px] font-black rounded px-1.5 py-0.5 ${L === 0 ? 'bg-rose-600 text-white' : L === 1 ? 'bg-amber-500 text-ink-900' : 'bg-sky-500 text-ink-900'}">${LIM_KO[L]}</span>`; };
+  const KIND_ORDER = { monster: 0, spell: 1, trap: 2, extra: 3 };
+  function dkSecRows(d, secName) {
+    const sec = d[secName];
+    const rows = Object.entries(sec).map(([kid, n]) => [DK.byKid.get(+kid), n, +kid]).sort((a, b) => (a[0] ? KIND_ORDER[a[0].kind] : 9) - (b[0] ? KIND_ORDER[b[0].kind] : 9) || ((a[0] && a[0].name) || '').localeCompare((b[0] && b[0].name) || '', 'ko'));
+    if (!rows.length) return `<p class="text-xs text-slate-500 px-1 py-2">비어 있습니다. 아래에서 카드를 검색해 추가하세요.</p>`;
+    return rows.map(([c, n, kid]) => {
+      const over = dkCopies(d, kid) > dkLim(kid);
+      return `<div class="flex items-center gap-2 rounded-xl ${over ? 'bg-rose-950/40 border border-rose-800/60' : 'bg-slate-800/50'} px-2 py-1.5">
+        ${c && c.pass ? `<img src="${dkImg(c)}" loading="lazy" alt="" class="w-8 h-11 object-cover rounded flex-none bg-slate-700">` : '<div class="w-8 h-11 rounded bg-slate-700 flex-none"></div>'}
+        <button data-dk="open" data-kid="${kid}" class="flex-1 min-w-0 text-left"><div class="text-[13px] font-bold truncate">${esc(c ? c.name : '#' + kid)}</div><div class="text-[10px] text-slate-400 truncate">${c ? esc(dkType(c)) : ''}</div></button>
+        ${limBadge(kid)}
+        <div class="flex items-center flex-none">
+          <button data-dk="minus" data-kid="${kid}" data-sec="${secName}" class="w-7 h-7 rounded-lg text-slate-300 hover:bg-slate-700"><i class="fa-solid fa-minus text-xs"></i></button>
+          <span class="w-5 text-center text-sm font-black ${over ? 'text-rose-300' : ''}">${n}</span>
+          <button data-dk="plus" data-kid="${kid}" data-sec="${secName}" class="w-7 h-7 rounded-lg text-slate-300 hover:bg-slate-700"><i class="fa-solid fa-plus text-xs"></i></button>
+          <button data-dk="move" data-kid="${kid}" data-sec="${secName}" title="${secName === 'side' ? '덱으로' : '사이드로'}" class="w-7 h-7 rounded-lg text-slate-500 hover:text-amber-300 hover:bg-slate-700"><i class="fa-solid ${secName === 'side' ? 'fa-arrow-up' : 'fa-arrow-down'} text-xs"></i></button>
+        </div></div>`;
+    }).join('');
+  }
+  function dkResultRow(c, extraHtml) {
+    const L = dkLim(c.kid), n = dkCopies(dkCur(), c.kid);
+    return `<div class="flex items-center gap-2 rounded-xl bg-slate-800/50 px-2 py-1.5">
+      ${c.pass ? `<img src="${dkImg(c)}" loading="lazy" alt="" class="w-8 h-11 object-cover rounded flex-none bg-slate-700">` : '<div class="w-8 h-11 rounded bg-slate-700 flex-none"></div>'}
+      <button data-dk="open" data-kid="${c.kid}" class="flex-1 min-w-0 text-left"><div class="text-[13px] font-bold truncate">${esc(c.name)}</div><div class="text-[10px] text-slate-400 truncate">${esc(dkType(c))}</div>${extraHtml || ''}</button>
+      ${limBadge(c.kid)}
+      <div class="flex flex-col gap-1 flex-none">
+        <button data-dk="add" data-kid="${c.kid}" ${L <= n ? 'disabled' : ''} class="rounded-lg px-2 py-1 text-[11px] font-bold ${L <= n ? 'bg-slate-800 text-slate-600' : 'bg-amber-500 text-ink-900'}">+ ${c.extra ? '엑스트라' : '메인'}${n ? ` (${n})` : ''}</button>
+        <button data-dk="addSide" data-kid="${c.kid}" ${L <= n ? 'disabled' : ''} class="rounded-lg px-2 py-1 text-[10px] font-bold border ${L <= n ? 'border-slate-800 text-slate-600' : 'border-slate-600 text-slate-300'}">+ 사이드</button>
+      </div></div>`;
+  }
+  function dkSearch() {
+    const q = DK.q.trim(), f = DK.f;
+    let list;
+    if (q) {
+      const choOnly = /^[ㄱ-ㅎ]+$/.test(q.replace(/\s/g, '')), nq = choOnly ? q.replace(/\s/g, '') : norm(q);
+      list = DK.db.filter(c => choOnly ? c.cho.includes(nq) : c.nk.includes(nq));
+      list.sort((a, b) => (a.nk.startsWith(nq) ? 0 : 1) - (b.nk.startsWith(nq) ? 0 : 1) || a.name.length - b.name.length);
+    } else if (f.kind !== 'all' || f.attr || f.race || f.text) list = DK.db.slice().reverse();
+    else return null;
+    list = list.filter(c => (f.kind === 'all' || c.kind === f.kind) && (!f.attr || c.attr === f.attr) && (!f.race || c.race === f.race) && (!f.text || c.text.includes(f.text)) && (!f.legal || dkLim(c.kid) > 0));
+    return list.slice(0, 50);
+  }
+
+  function renderDeck() {
+    const root = $('#viewDeck'); if (!root) return;
+    if (!DK.db) {
+      root.innerHTML = `<div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-center text-sm text-slate-300">${DK.err ? `<i class="fa-solid fa-triangle-exclamation text-rose-400"></i> 덱 빌더 데이터를 불러오지 못했습니다. <button data-dk="retry" class="underline text-amber-400 ml-1">다시 시도</button>` : '<i class="fa-solid fa-circle-notch spin text-amber-400 mr-1"></i>전체 카드 데이터와 리미트 레귤레이션을 불러오는 중… (약 1MB)'}</div>`;
+      if (!DK.loading && !DK.err) dkLoad().then(renderDeck);
+      return;
+    }
+    const d = dkCur(), chk = dkCheck(d), B = DK.ban[DK.reg] || {};
+    const regSel = `<select data-dk="reg" class="${SEL} flex-none">${['ko', 'ja'].filter(k => DK.ban[k]).map(k => `<option value="${k}" ${DK.reg === k ? 'selected' : ''}>${esc(DK.ban[k].label)} · ${esc(DK.ban[k].date || '')}</option>`).join('')}</select>`;
+    const deckSel = `<select data-dk="deckSel" class="${SEL} flex-1 min-w-0">${DK.decks.map((x, i) => `<option value="${i}" ${i === DK.cur ? 'selected' : ''}>${esc(x.name)} (${dkCount(x.main)}/${dkCount(x.extra)}/${dkCount(x.side)})</option>`).join('')}</select>`;
+    const tabBtn = (k, label, icon) => `<button data-dk="tab" data-v="${k}" class="flex-1 py-2 text-xs font-bold rounded-lg ${DK.tab === k ? 'bg-amber-500 text-ink-900' : 'text-slate-300 hover:bg-slate-800'}"><i class="fa-solid ${icon} mr-1"></i>${label}</button>`;
+    let body = '';
+    if (DK.tab === 'edit') body = dkEditHtml(d, chk);
+    else if (DK.tab === 'auto') body = dkAutoHtml();
+    else body = dkRecoHtml(d);
+    root.innerHTML = `
+      <div class="mb-2 px-1">
+        <h2 class="text-lg font-extrabold flex items-center gap-2"><i class="fa-solid fa-box-archive text-amber-400"></i>덱 빌더</h2>
+        <p class="text-xs text-slate-400 mt-0.5 break-keep">KONAMI 공식 리미트 레귤레이션(${esc(B.label || '')} ${esc(B.date || '')} 적용)으로 덱을 검사합니다. ${B.updates && B.updates.length ? `<button data-dk="showUpd" class="underline text-amber-300">이번 변경 ${B.updates.length}장</button>` : ''}</p>
+      </div>
+      ${DK.showUpd && B.updates ? `<div class="rounded-xl bg-slate-900/70 border border-slate-800 p-2.5 mb-2 text-[11px] text-slate-300 flex flex-col gap-0.5">${B.updates.map(([kid, nm, ch]) => `<div class="flex gap-2"><button data-dk="open" data-kid="${kid}" class="flex-1 text-left truncate hover:text-amber-300">${esc(nm)}</button><span class="flex-none text-amber-300">${esc(ch)}</span></div>`).join('')}</div>` : ''}
+      <div class="flex items-center gap-1.5 mb-2">${regSel}${deckSel}</div>
+      <div class="flex flex-wrap gap-1.5 mb-2 text-[11px] font-bold">
+        <button data-dk="new" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-300"><i class="fa-solid fa-plus mr-1"></i>새 덱</button>
+        <button data-dk="rename" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-300"><i class="fa-solid fa-pen mr-1"></i>이름</button>
+        <button data-dk="dup" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-300"><i class="fa-solid fa-copy mr-1"></i>복제</button>
+        <button data-dk="imp" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-300"><i class="fa-solid fa-file-import mr-1"></i>가져오기</button>
+        <button data-dk="expYdk" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-300"><i class="fa-solid fa-file-export mr-1"></i>YDK</button>
+        <button data-dk="copyText" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-300"><i class="fa-solid fa-clipboard mr-1"></i>목록 복사</button>
+        <button data-dk="del" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-slate-500 hover:text-rose-400 ml-auto"><i class="fa-solid fa-trash-can mr-1"></i>삭제</button>
+      </div>
+      ${DK.impOpen ? `<div class="rounded-xl bg-slate-900/70 border border-slate-700 p-2.5 mb-2">
+        <p class="text-[11px] text-slate-400 mb-1.5 break-keep">YDK 파일 내용(#main / #extra / !side)이나 「3 하루 우라라」 같은 목록을 붙여 넣으세요. 새 덱으로 만듭니다.</p>
+        <textarea id="dkImpText" rows="6" class="w-full ${SEL} font-mono text-[11px]"></textarea>
+        <div class="flex gap-1.5 mt-1.5"><button data-dk="impDo" class="flex-1 rounded-lg bg-amber-500 text-ink-900 font-bold text-xs py-2">새 덱으로 가져오기</button><button data-dk="imp" class="rounded-lg border border-slate-700 px-3 text-xs">닫기</button></div></div>` : ''}
+      <div class="flex gap-1 rounded-xl bg-slate-900/70 border border-slate-800 p-1 mb-3">${tabBtn('edit', '덱 편집', 'fa-pen-to-square')}${tabBtn('auto', '자동 구성', 'fa-wand-magic-sparkles')}${tabBtn('reco', '카드 추천', 'fa-lightbulb')}</div>
+      ${body}
+      ${DK.toast ? `<div class="fixed left-1/2 -translate-x-1/2 bottom-24 z-50 max-w-[90vw] rounded-xl bg-slate-100 text-ink-900 text-xs font-bold px-3 py-2 shadow-2xl break-keep">${esc(DK.toast)}</div>` : ''}`;
+  }
+
+  function dkEditHtml(d, chk) {
+    const msgs = [...chk.err.map(t => ['err', t]), ...chk.warn.map(t => ['warn', t])];
+    const kinds = { monster: 0, spell: 0, trap: 0 };
+    for (const [kid, n] of Object.entries(d.main)) { const c = DK.byKid.get(+kid); if (c) kinds[c.kind === 'extra' ? 'monster' : c.kind] += n; }
+    const htN = Object.entries(d.main).reduce((a, [kid, n]) => { const c = DK.byKid.get(+kid); return a + (c && roleHit(ROLES[0], c.text) ? n : 0); }, 0);
+    const N = chk.m;
+    const probRows = Object.entries(d.main).map(([kid, n]) => [DK.byKid.get(+kid), n]).filter(x => x[0]).sort((a, b) => b[1] - a[1] || a[0].name.localeCompare(b[0].name, 'ko'))
+      .map(([c, n]) => `<tr><td class="truncate max-w-[160px]">${esc(c.name)}</td><td class="text-center">${n}</td><td class="text-right">${(dkProb(N, n, 5) * 100).toFixed(1)}%</td><td class="text-right">${(dkProb(N, n, 6) * 100).toFixed(1)}%</td></tr>`).join('');
+    const res = dkSearch();
+    const f = DK.f;
+    const races = [...new Set(DK.db.filter(c => c.race).map(c => c.race))].sort((a, b) => a.localeCompare(b, 'ko'));
+    return `
+      <div class="rounded-2xl border ${chk.err.length ? 'border-rose-700/70' : 'border-emerald-700/60'} bg-slate-900/60 p-3 mb-2">
+        <div class="flex items-center gap-2 flex-wrap text-sm font-extrabold">
+          <span class="${chk.m < 40 || chk.m > 60 ? 'text-rose-300' : ''}">메인 ${chk.m}</span><span class="text-slate-600">/</span>
+          <span class="${chk.x > 15 ? 'text-rose-300' : ''}">엑스트라 ${chk.x}</span><span class="text-slate-600">/</span>
+          <span class="${chk.s > 15 ? 'text-rose-300' : ''}">사이드 ${chk.s}</span>
+          <span class="ml-auto text-xs rounded-lg px-2 py-1 ${chk.err.length ? 'bg-rose-600 text-white' : 'bg-emerald-600 text-white'}">${chk.err.length ? '사용 불가' : '사용 가능'}</span>
+        </div>
+        <div class="text-[11px] text-slate-400 mt-1">몬스터 ${kinds.monster} · 마법 ${kinds.spell} · 함정 ${kinds.trap} · 패 트랩 ${htN}</div>
+        ${msgs.length ? `<div class="mt-2 flex flex-col gap-1">${msgs.map(([k, t]) => `<p class="text-[11px] flex gap-1.5 ${k === 'err' ? 'text-rose-300' : 'text-amber-300'}"><i class="fa-solid ${k === 'err' ? 'fa-circle-xmark' : 'fa-triangle-exclamation'} mt-0.5"></i><span class="break-keep">${esc(t)}</span></p>`).join('')}</div>` : ''}
+      </div>
+      ${['main', 'extra', 'side'].map(s => `<div class="mb-2"><div class="text-xs font-extrabold text-slate-300 px-1 mb-1">${{ main: '메인 덱', extra: '엑스트라 덱', side: '사이드 덱' }[s]} <span class="text-slate-500">${dkCount(d[s])}장</span></div><div class="flex flex-col gap-1">${dkSecRows(d, s)}</div></div>`).join('')}
+      ${N ? `<details class="mb-3 rounded-xl bg-slate-900/60 border border-slate-800"><summary class="px-3 py-2 text-xs font-bold text-slate-300"><i class="fa-solid fa-chevron-down chev text-[9px] mr-1"></i>첫 패에 1장 이상 올 확률</summary>
+        <div class="acc-body px-3 pb-3"><table class="rule-table"><thead><tr><th>카드</th><th>매수</th><th>선공 5장</th><th>후공 6장</th></tr></thead><tbody>${probRows}</tbody></table></div></details>` : ''}
+      <div class="rounded-2xl border border-dashed border-slate-700 bg-slate-900/40 p-2.5">
+        <div class="text-xs font-extrabold text-slate-300 mb-1.5"><i class="fa-solid fa-magnifying-glass mr-1 text-amber-400"></i>카드 검색해서 추가</div>
+        <input data-dk="q" value="${esc(DK.q)}" type="search" autocomplete="off" spellcheck="false" placeholder="카드명 · 초성" class="w-full ${SEL} py-2 text-sm">
+        <div class="grid grid-cols-2 gap-1.5 mt-1.5">
+          <select data-dk="fKind" class="${SEL}">${[['all', '모든 종류'], ['monster', '메인 몬스터'], ['extra', '엑스트라 몬스터'], ['spell', '마법'], ['trap', '함정']].map(([v, n]) => `<option value="${v}" ${f.kind === v ? 'selected' : ''}>${n}</option>`).join('')}</select>
+          <select data-dk="fAttr" class="${SEL}"><option value="">모든 속성</option>${ATTR_LIST.map(a => `<option ${f.attr === a ? 'selected' : ''}>${a}</option>`).join('')}</select>
+          <select data-dk="fRace" class="${SEL}"><option value="">모든 종족</option>${races.map(a => `<option ${f.race === a ? 'selected' : ''}>${a}</option>`).join('')}</select>
+          <input data-dk="fText" value="${esc(f.text)}" type="search" placeholder="효과 문구 (예: 덱에서)" class="${SEL}">
+        </div>
+        <label class="inline-flex items-center gap-1 text-[11px] text-slate-400 mt-1.5"><input type="checkbox" data-dk="fLegal" class="accent-amber-500" ${f.legal ? 'checked' : ''}>금지 카드 빼기</label>
+        <div class="flex flex-col gap-1 mt-2">${res ? (res.length ? res.map(c => dkResultRow(c)).join('') : '<p class="text-xs text-slate-500 px-1">검색 결과가 없습니다.</p>') : '<p class="text-xs text-slate-500 px-1 break-keep">이름이나 조건을 입력하면 결과가 나옵니다. 「카드 추천」 탭에서 역할(서치·패 트랩 등)로도 찾을 수 있습니다.</p>'}</div>
+      </div>`;
+  }
+
+  function dkAutoHtml() {
+    const A = DK.auto, found = A.q ? dkArchFind(A.q) : [];
+    const deckArch = dkDeckArch(dkCur()).slice(0, 3);
+    const R = A.result;
+    return `
+      <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
+        <p class="text-[11px] text-slate-400 break-keep">테마(아키타입)를 고르면, 그 테마 카드 중 <b class="text-slate-200">덱에서 서치·특수 소환하는 카드</b>와 새 지원 카드를 우선해 넣고, 선택한 리미트 레귤레이션에서 쓸 수 있는 패 트랩·범용 카드로 채웁니다. 실제 대회 채용률은 반영하지 않으므로, 만든 뒤 직접 다듬으세요.</p>
+        <input data-dk="autoQ" value="${esc(A.q)}" type="search" autocomplete="off" spellcheck="false" placeholder="테마 이름 (예: 티아라멘츠, 스네이크아이, 푸른 눈)" class="w-full ${SEL} py-2 text-sm mt-2">
+        <div class="flex flex-wrap gap-1.5 mt-1.5">
+          ${deckArch.map(({ a }) => `<button data-dk="autoPick" data-en="${esc(a.en)}" class="rounded-full px-2.5 py-1 text-[11px] font-bold border ${A.arch && A.arch.en === a.en ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-600 text-slate-300'}">현재 덱: ${esc(a.ko || a.en)}</button>`).join('')}
+          ${found.map(a => `<button data-dk="autoPick" data-en="${esc(a.en)}" class="rounded-full px-2.5 py-1 text-[11px] font-bold border ${A.arch && A.arch.en === a.en ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-700 text-slate-300'}">${esc(a.ko || a.en)} <span class="text-slate-500">${a.cards.length}장</span></button>`).join('')}
+        </div>
+        <div class="grid grid-cols-2 gap-1.5 mt-2 text-[11px] text-slate-400">
+          <label class="flex items-center gap-1.5">메인 덱<select data-dk="autoSize" class="${SEL} flex-1">${[40, 41, 42, 43, 44, 45].map(n => `<option ${A.size === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+          <label class="flex items-center gap-1.5">패 트랩<select data-dk="autoHt" class="${SEL} flex-1">${[0, 3, 6, 9, 12, 15].map(n => `<option ${A.ht === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+        </div>
+        <label class="inline-flex items-center gap-1 text-[11px] text-slate-400 mt-1.5"><input type="checkbox" data-dk="autoGen" class="accent-amber-500" ${A.generic ? 'checked' : ''}>범용 마법·함정 포함 (최대 3장)</label>
+        <button data-dk="autoRun" ${A.arch ? '' : 'disabled'} class="mt-2 w-full rounded-xl font-extrabold text-sm py-2.5 ${A.arch ? 'bg-amber-500 text-ink-900' : 'bg-slate-800 text-slate-500'}"><i class="fa-solid fa-wand-magic-sparkles mr-1.5"></i>${A.arch ? `「${esc(A.arch.ko || A.arch.en)}」 덱 자동 구성` : '테마를 고르세요'}</button>
+      </div>
+      ${R ? `<div class="rounded-2xl border border-amber-800/50 bg-amber-950/10 p-3 mt-3">
+        <div class="text-sm font-extrabold">${esc(R.deck.name)} <span class="text-xs text-slate-400">메인 ${dkCount(R.deck.main)} · 엑스트라 ${dkCount(R.deck.extra)}</span></div>
+        <ul class="mt-1 text-[11px] text-slate-300 list-disc pl-4 flex flex-col gap-0.5">${R.log.map(t => `<li class="break-keep">${esc(t)}</li>`).join('')}</ul>
+        <div class="mt-2 text-[11px] text-slate-400 break-keep">${['main', 'extra'].map(s => Object.entries(R.deck[s]).map(([kid, n]) => `${n} ${esc((DK.byKid.get(+kid) || {}).name || '')}`).join(' · ')).join('<br><br>')}</div>
+        <div class="flex gap-1.5 mt-2"><button data-dk="autoSave" class="flex-1 rounded-lg bg-amber-500 text-ink-900 font-bold text-xs py-2">새 덱으로 저장하고 편집</button><button data-dk="autoClear" class="rounded-lg border border-slate-700 px-3 text-xs">지우기</button></div>
+      </div>` : ''}`;
+  }
+
+  function dkRecoHtml(d) {
+    const R = DK.reco;
+    const rec = dkRecommend(d);
+    const found = (R.roles.length || R.q.trim()) ? dkRoleSearch(R.roles, R.q, R.kind) : null;
+    return `
+      <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3 mb-3">
+        <div class="text-xs font-extrabold text-slate-300 mb-1.5"><i class="fa-solid fa-sliders mr-1 text-amber-400"></i>원하는 카드 찾기</div>
+        <div class="flex flex-wrap gap-1.5">${ROLES.map(([k, n]) => `<button data-dk="role" data-v="${k}" class="rounded-full px-2.5 py-1 text-[11px] font-bold border ${R.roles.includes(k) ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-700 text-slate-300'}">${n}</button>`).join('')}</div>
+        <div class="flex gap-1.5 mt-2">
+          <input data-dk="recoQ" value="${esc(R.q)}" type="search" placeholder="효과 문구·이름 (예: 드래곤족, 엑시즈 소재)" class="flex-1 min-w-0 ${SEL} py-2">
+          <select data-dk="recoKind" class="${SEL} flex-none">${[['all', '전체'], ['monster', '메인 몬스터'], ['extra', '엑스트라'], ['spell', '마법'], ['trap', '함정']].map(([v, n]) => `<option value="${v}" ${R.kind === v ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        </div>
+        <p class="text-[10px] text-slate-500 mt-1">고른 역할을 모두 가진 카드를 찾습니다. 금지 카드는 제외합니다.</p>
+        ${found ? `<div class="flex flex-col gap-1 mt-2">${found.length ? found.map(x => dkResultRow(x.c, x.sent ? `<div class="text-[10px] text-slate-500 truncate">${esc(x.sent)}</div>` : '')).join('') : '<p class="text-xs text-slate-500">조건에 맞는 카드가 없습니다.</p>'}</div>` : ''}
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
+        <div class="text-xs font-extrabold text-slate-300 mb-1"><i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i>「${esc(d.name)}」에 어울리는 카드</div>
+        <p class="text-[10px] text-slate-500 mb-2 break-keep">같은 테마, 덱의 카드를 서치·지원하는 카드, 덱의 카드가 다루는 카드, 많이 쓴 속성·종족을 지원하는 카드를 텍스트로 찾습니다.</p>
+        <div class="flex flex-col gap-1">${rec.length ? rec.map(x => dkResultRow(x.c, `<div class="text-[10px] text-emerald-300/90 truncate">${esc(x.r.slice(0, 3).join(' · '))}</div>`)).join('') : '<p class="text-xs text-slate-500">덱에 카드를 넣으면 어울리는 카드를 추천합니다.</p>'}</div>
+      </div>`;
+  }
+
+  // ---------- 이벤트 ----------
+  (() => {
+    const root = $('#viewDeck'); if (!root) return;
+    let tq = null;
+    root.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-dk]'); if (!t || t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return;
+      const a = t.dataset.dk, kid = Number(t.dataset.kid), d = dkCur();
+      switch (a) {
+        case 'retry': DK.err = null; dkLoad().then(renderDeck); break;
+        case 'tab': DK.tab = t.dataset.v; break;
+        case 'open': go('#c' + kid); return;
+        case 'add': dkAdd(kid, 'deck'); break;
+        case 'addSide': dkAdd(kid, 'side'); break;
+        case 'plus': dkAdd(kid, t.dataset.sec === 'side' ? 'side' : 'deck'); break;
+        case 'minus': { const s = d[t.dataset.sec]; if (s[kid]) { s[kid]--; if (!s[kid]) delete s[kid]; d.updated = Date.now(); } break; }
+        case 'move': {
+          const from = t.dataset.sec, c = DK.byKid.get(kid); if (!c) break;
+          const to = from === 'side' ? (c.extra ? 'extra' : 'main') : 'side';
+          if (dkCount(d[to]) >= (to === 'main' ? 60 : 15)) { dkToast('옮길 덱이 가득 찼습니다.'); return; }
+          d[from][kid]--; if (!d[from][kid]) delete d[from][kid]; d[to][kid] = (d[to][kid] || 0) + 1; break;
+        }
+        case 'new': DK.decks.push(dkNew(`새 덱 ${DK.decks.length + 1}`)); DK.cur = DK.decks.length - 1; DK.tab = 'edit'; break;
+        case 'rename': { const n = prompt('덱 이름', d.name); if (n && n.trim()) d.name = n.trim().slice(0, 40); break; }
+        case 'dup': { const c = JSON.parse(JSON.stringify(d)); c.id = dkNew('').id; c.name = d.name + ' (복제)'; DK.decks.push(c); DK.cur = DK.decks.length - 1; break; }
+        case 'del': if (confirm(`「${d.name}」 덱을 삭제할까요?`)) { DK.decks.splice(DK.cur, 1); if (!DK.decks.length) DK.decks.push(dkNew('새 덱')); DK.cur = Math.max(0, DK.cur - 1); } break;
+        case 'imp': DK.impOpen = !DK.impOpen; break;
+        case 'impDo': {
+          const txt = ($('#dkImpText') || {}).value || ''; if (!txt.trim()) return;
+          const { d: nd, miss } = dkImport(txt, `가져온 덱 ${DK.decks.length + 1}`);
+          DK.decks.push(nd); DK.cur = DK.decks.length - 1; DK.impOpen = false; DK.tab = 'edit';
+          dkSave(); dkToast(miss.length ? `가져왔습니다. 찾지 못한 카드 ${miss.length}장: ${miss.slice(0, 3).join(', ')}${miss.length > 3 ? '…' : ''}` : '가져왔습니다.'); return;
+        }
+        case 'expYdk': dkDownload(`${d.name.replace(/[\\/:*?"<>|]/g, '_')}.ydk`, dkToYdk(d)); return;
+        case 'copyText': { const txt = dkToText(d); (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(() => dkToast('덱 목록을 복사했습니다.'), () => { prompt('복사하세요', txt); }); return; }
+        case 'showUpd': DK.showUpd = !DK.showUpd; break;
+        case 'autoPick': DK.auto.arch = DK.arch.find(x => x.en === t.dataset.en) || null; DK.auto.result = null; break;
+        case 'autoRun': if (DK.auto.arch) DK.auto.result = dkAutoBuild(DK.auto.arch, DK.auto); break;
+        case 'autoSave': if (DK.auto.result) { DK.decks.push(DK.auto.result.deck); DK.cur = DK.decks.length - 1; DK.auto.result = null; DK.tab = 'edit'; } break;
+        case 'autoClear': DK.auto.result = null; break;
+        case 'role': { const v = t.dataset.v, r = DK.reco.roles; DK.reco.roles = r.includes(v) ? r.filter(x => x !== v) : [...r, v]; break; }
+        default: return;
+      }
+      dkSave(); renderDeck();
+    });
+    root.addEventListener('change', (e) => {
+      const t = e.target, a = t.dataset && t.dataset.dk; if (!a) return;
+      if (a === 'reg') DK.reg = t.value;
+      else if (a === 'deckSel') DK.cur = Number(t.value);
+      else if (a === 'fKind') DK.f.kind = t.value;
+      else if (a === 'fAttr') DK.f.attr = t.value;
+      else if (a === 'fRace') DK.f.race = t.value;
+      else if (a === 'fLegal') DK.f.legal = t.checked;
+      else if (a === 'autoSize') DK.auto.size = Number(t.value);
+      else if (a === 'autoHt') DK.auto.ht = Number(t.value);
+      else if (a === 'autoGen') DK.auto.generic = t.checked;
+      else if (a === 'recoKind') DK.reco.kind = t.value;
+      else return;
+      if (a === 'reg' || a.startsWith('auto')) DK.auto.result = null;
+      dkSave(); renderDeck();
+    });
+    root.addEventListener('input', (e) => {
+      const t = e.target, a = t.dataset && t.dataset.dk; if (!a || !['q', 'fText', 'autoQ', 'recoQ'].includes(a)) return;
+      if (a === 'q') DK.q = t.value; else if (a === 'fText') DK.f.text = t.value; else if (a === 'autoQ') DK.auto.q = t.value; else DK.reco.q = t.value;
+      clearTimeout(tq);
+      tq = setTimeout(() => {
+        const pos = t.selectionStart;
+        renderDeck();
+        const el = root.querySelector(`[data-dk="${a}"]`);
+        if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch {} }
+      }, 220);
+    });
+  })();
+  dkLoadDecks();
+
+  // ======================================================================
   // 시작
   // ======================================================================
   store.del('ygo_judge_recent_v1'); // v1(패스코드 기반) 기록 정리
@@ -4041,7 +4600,7 @@
   route();
   loadIndex(false);
   // 로컬 개발 서버에서만: 전체 카드 텍스트 점검용 판정 함수
-  if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) window.__ygo = { analyze, classify, effKind, isActivated, actZone, effLocation, linkAction, targetSpec, summonSpec, costSpec, responseCond, summonNeg, guessOut, evMatches, immediatePart, resolvePart, faqClass, negGuess, textLang, splitEffects, CH, cardCache, protParse, equipSpec, cantNegate, noChainTo, validateOut, validateChain, simulate, postTriggers, linkHtml, outHtml, resolveHtml, nextHtml, segocHtml, eventHtml };
+  if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) window.__ygo = { analyze, classify, effKind, isActivated, actZone, effLocation, linkAction, targetSpec, summonSpec, costSpec, responseCond, summonNeg, guessOut, evMatches, immediatePart, resolvePart, faqClass, negGuess, textLang, splitEffects, CH, cardCache, protParse, equipSpec, DK, dkLoad, dkAutoBuild, dkCheck, dkRecommend, dkRoleSearch, dkImport, dkToYdk, dkArchFind, dkLim, cantNegate, noChainTo, validateOut, validateChain, simulate, postTriggers, linkHtml, outHtml, resolveHtml, nextHtml, segocHtml, eventHtml };
 })();
 </script>
 </body>

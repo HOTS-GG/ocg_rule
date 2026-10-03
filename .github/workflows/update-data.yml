@@ -1,0 +1,28 @@
+name: 카드·리미트 레귤레이션 데이터 갱신
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # 매일 03:00 KST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 데이터 갱신 (새 카드 + 최근 카드 텍스트 + 공식 리미트 레귤레이션)
+        run: python tools/update_data.py --refresh 200
+      - name: 바뀐 내용이 있으면 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then echo "변경 없음"; exit 0; fi
+          git commit -m "데이터 자동 갱신 ($(date -u +%Y-%m-%d))"
+          git push
