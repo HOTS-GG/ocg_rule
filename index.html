@@ -1380,7 +1380,9 @@
   // 체인 빌더
   // ======================================================================
   const CHAIN_KEY = 'ygo_judge_chain_v1';
-  const CH = { turn: 'me', dmg: false, links: [], ev: { type: 'none', sub: 'normal', ctrl: 'opp', kid: null }, out: [], trig: [], postSel: {}, qaShown: 0, qaSig: '', resetArm: false };
+  const PHASES = [['draw', '드로우 페이즈'], ['standby', '스탠바이 페이즈'], ['main1', '메인 페이즈 1'], ['battle', '배틀 페이즈'], ['main2', '메인 페이즈 2'], ['end', '엔드 페이즈']];
+  const PHASE_KO = Object.fromEntries(PHASES);
+  const CH = { turn: 'me', phase: 'main1', dmg: false, links: [], ev: { type: 'none', sub: 'normal', ctrl: 'opp', kid: null }, out: [], trig: [], postSel: {}, qaShown: 0, qaSig: '', resetArm: false };
   let uidSeq = 1;
   const effsCache = new WeakMap();
   const KIND_KO = { act: '카드의 발동', quick: '유발즉시', trigger: '유발', ignition: '기동' };
@@ -1388,10 +1390,10 @@
   const OUT_FIELDS = ['uid', 'kid', 'ctrl', 'loc', 'fx'];
   function saveChain() {
     store.set(CHAIN_KEY, JSON.stringify({
-      turn: CH.turn, dmg: CH.dmg,
+      turn: CH.turn, phase: CH.phase, dmg: CH.dmg,
       ev: { type: CH.ev.type, sub: CH.ev.sub, ctrl: CH.ev.ctrl, kid: CH.ev.kid },
       out: CH.out.map(o => Object.fromEntries(OUT_FIELDS.map(k => [k, o[k]]))),
-      links: CH.links.map(l => ({ uid: l.uid, kid: l.kid, ctrl: l.ctrl, eff: l.eff, ssO: l.ssO, segoc: l.segoc, setTurn: l.setTurn, wasSet: l.wasSet, lost: l.lost, neg: l.neg, negAuto: l.negAuto, tg: l.tg || [], costB: l.costB || [], costK: l.costK || [], sumK: l.sumK || [] }))
+      links: CH.links.map(l => ({ uid: l.uid, kid: l.kid, ctrl: l.ctrl, eff: l.eff, ssO: l.ssO, segoc: l.segoc, setTurn: l.setTurn, wasSet: l.wasSet, lost: l.lost, neg: l.neg, negAuto: l.negAuto, tg: l.tg || [], costB: l.costB || [], costK: l.costK || [], sumK: l.sumK || [], movK: l.movK || [], zone: l.zone || null }))
     }));
     const badge = $('#chainBadge');
     badge.textContent = CH.links.length; badge.classList.toggle('hidden', !CH.links.length);
@@ -1400,7 +1402,7 @@
     try {
       const sv = JSON.parse(store.get(CHAIN_KEY) || 'null');
       if (sv) {
-        CH.turn = sv.turn === 'opp' ? 'opp' : 'me'; CH.dmg = !!sv.dmg;
+        CH.turn = sv.turn === 'opp' ? 'opp' : 'me'; CH.dmg = !!sv.dmg; CH.phase = PHASES.some(p => p[0] === sv.phase) ? sv.phase : (CH.dmg ? 'battle' : 'main1');
         CH.links = (sv.links || []).filter(l => l && l.kid).map(l => Object.assign({ eff: 0, ssO: 0, segoc: false, setTurn: false, wasSet: false, lost: false, neg: null, negAuto: true, ctrl: 'me' }, l));
         if (sv.ev) CH.ev = Object.assign({ type: 'none', sub: 'normal', ctrl: 'opp', kid: null }, sv.ev);
         // 예전 형식(카드마다 효과·유형 1개)도 읽어 효과별 설정으로 바꾼다
@@ -1416,7 +1418,7 @@
   }
   function hydrateChain() {
     // 코스트로 보낸 패·덱의 카드 정보도 불러둔다
-    for (const l of CH.links) for (const kid of [...(l.costK || []), ...(l.sumK || [])]) if (!cardCache.has(kid)) loadCard(kid).then(() => { if (state.view === 'chain') renderChain(); }).catch(() => {});
+    for (const l of CH.links) for (const kid of [...(l.costK || []), ...(l.sumK || []), ...(l.movK || [])]) if (!cardCache.has(kid)) loadCard(kid).then(() => { if (state.view === 'chain') renderChain(); }).catch(() => {});
     const items = [...CH.links, ...CH.out];
     if (CH.ev.kid) items.push(CH.ev);
     for (const l of items) if (!l.m && !l.loading) {
@@ -1430,19 +1432,33 @@
   const SEG_RE = /(?=[\u2460-\u2473]\s*[:：])/;
   const splitEffects = (t) => String(t || '').replace(/\r\n?/g, '\n').split(SEG_RE).map(x => x.trim()).filter(x => /^[\u2460-\u2473]\s*[:：]/.test(x));
   // OCG 텍스트에는 「(퀵 이펙트)」 표기가 없는 유발즉시 효과가 많으므로 타이밍 문구로도 판별
-  const QUICK_TIMING_FIRST = /(발동했을|발동되었을)\s*때|(일반 소환|특수 소환|반전 소환|소환)할 때|発動した時|召喚する際/;
-  const QUICK_TIMING = /(상대|자신\s*\/\s*상대)\s*(턴|메인 페이즈|배틀 페이즈)(에|의)|공격 선언시|데미지 계산시|데미지 계산 전|데미지 스텝 개시시|相手(ターン|メインフェイズ|バトルフェイズ)|攻撃宣言時|ダメージ計算時|ダメージ計算前/;
+  const QUICK_TIMING_FIRST = /(발동했을|발동되었을)\s*때|(일반 소환|특수 소환|반전 소환|소환)할 (?:때|시기)|소환하는 시기|発動した時|召喚する際/;
+  const QUICK_TIMING = /(상대|자신\s*\/\s*상대|자신이나 상대|서로)(?:의)?\s*(턴|메인 페이즈|배틀 페이즈|배틀 스텝|데미지 스텝)\s*(에|의|중|및)|배틀 스텝(?:에|중|시)|데미지 스텝(?:시|중)에|데미지 계산시|相手(ターン|メインフェイズ|バトルフェイズ)|ダメージ計算時/;
+  // 몬스터의 「공격 선언시」「데미지 스텝 개시시」「데미지 계산 전」은 유발 효과 (공식 FAQ 분류)
+  const TRIG_TIMING = /공격 선언시|공격 선언했을|데미지 스텝 개시시|데미지 계산 전에|攻撃宣言時|ダメージステップ開始時|ダメージ計算前/;
+  // 「발동」 문구가 없는 예전 텍스트: 「리버스 :」「~했을 때, ~한다」「~할 때마다」
+  const OLD_TRIG = /^(?:[①-⑳]\s*[:：]\s*)?(?:리버스\s*[:：]|[^.。]*?(?:(?:했|되었|됐|졌|었|았|였|켰|렸|겼|쳤|웠|냈|줬)을\s*(?:경우|때)|때마다|(?:페이즈|스텝)\s*시|공격 선언시)[,，])/;
   // 스탠바이·엔드·드로우 페이즈를 지정해 발동하는 효과는 유발 효과
   const PHASE_TRIGGER = /(스탠바이|엔드|드로우) 페이즈(에|시)[^.。]*?(발동할 수 있다|발동한다)|(スタンバイ|エンド|ドロー)フェイズに[^。]*?(発動できる|発動する)|during (?:the|your|each) (?:Standby|End|Draw) Phase/i;
+  // 「~했을 경우 / ~되었을 때 / ~된 경우」처럼 일이 일어난 것을 조건으로 하는 문구 (유발 효과)
+  const KO_EVENT = /(?:했|되었|됐|졌|었|았|였|켰|렸|겼|쳤|웠|냈|섰|갔|왔|줬|봤)을\s*(?:경우|때)|(?:한|된|진|받은|준|낸|잃은|넣은|보낸|버린)\s*(?:경우|때)/;
   function effKind(t) {
     if (QUICK_RE.test(t) || QUICK_TIMING_FIRST.test(t)) return 'quick';
+    if (!/발동|発動/.test(t) && OLD_TRIG.test(t)) return 'trigger';
+    if (TRIG_TIMING.test((String(t).match(/^([\s\S]*?)(?:발동할 수 있다|발동한다|発動できる|発動する)/) || [, t])[1])) return 'trigger';
+    const head = (String(t).replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1];
+    if (head && /[가-힣]/.test(head) && /(경우|때)/.test(head) && !PHASE_TRIGGER.test(t)) {
+      if (KO_EVENT.test(head)) return 'trigger';
+      return QUICK_TIMING.test(t) ? 'quick' : 'ignition';   // 「패에 존재하고, ~적을 경우」: 상태 조건 → 기동 효과
+    }
     if (/(경우|때)[^.。]*?(발동할 수 있다|발동한다)|(場合|時)[^。]*?(発動できる|発動する)|\b(If|When)\b[^.]*?:/i.test(t) || PHASE_TRIGGER.test(t)) return 'trigger';
     if (QUICK_TIMING.test(t)) return 'quick';
     return 'ignition';
   }
   const isOptional = (t) => /발동할 수 있다|発動できる|\byou can\b/i.test(t);
   // 발동하는 효과: 「발동할 수 있다 / 발동한다」. 「~를 발동할 수 없다」 같은 지속 효과 문구는 제외
-  const isActivated = (t) => /발동할 수 있다|발동한다(?![가-힣])|発動できる|発動する(?!こと)|\byou can\b|\(Quick Effect\)|^(?:[\u2460-\u2473]\s*[:：]\s*)?(?:if|when|during)\b[^.]*?:/i.test(t);
+  const isActivated = (t) => /발동할 수 있다|발동한다(?![가-힣])|発動できる|発動する(?!こと)|\byou can\b|\(Quick Effect\)|^(?:[\u2460-\u2473]\s*[:：]\s*)?(?:if|when|during)\b[^.]*?:/i.test(t)
+    || (!/발동|대신|동안|존재하는 한/.test(t) && OLD_TRIG.test(t));
   const isTargeting = (t) => /대상으로 (?:하고|하여|해서|해)|対象として|対象に|target/i.test(t);
   function negGuess(t) {
     if (/발동을 무효|発動を無効|negate (?:the|its|that) activation/i.test(t)) return 'act';
@@ -1489,9 +1505,64 @@
         if (/ダメージステップ(?:中)?には(?:発動|適用)できません/.test(ja)) c.dmg = false;
       }
     }
+    // 예전 형식: 『①』のモンスター効果は、フィールドで発動する誘発効果です / 「카드명」のモンスター効果は起動効果です / 『예전 텍스트』は永続効果です
+    const segsJ = splitEffects(m.text.ja || m.text.ko || ''), psegsJ = splitEffects(m.pend.ja || m.pend.ko || '');
+    const nospace = (x) => String(x || '').replace(/[\s「」『』<>\d、。,.]/g, '');
+    const bp = m.base || {}, persistent = (bp.cardType === 'spell' && ['continuous', 'field', 'equip'].includes(bp.property)) || (bp.cardType === 'trap' && bp.property === 'continuous');
+    const blocks = []; let blk = null; flat = -1;
+    for (const k of Object.keys(entries).sort((a, b) => parseFloat(a) - parseFloat(b))) {
+      for (const e of entries[k] || []) {
+        flat++;
+        const ja = e.ja || '';
+        if (/【(?:.*?の)?[\u2460-\u2473]の効果について】/.test(ja)) { blk = null; continue; }
+        const mm = ja.match(OLD_FAQ_RE);
+        if (mm || /このカードの発動時の効果です|カードの発動時の効果/.test(ja)) { blk = { mm, act: !mm, lines: [], idx: [] }; blocks.push(blk); }
+        if (!blk) continue;
+        blk.lines.push(ja); blk.idx.push(flat);
+      }
+    }
+    for (const bl of blocks) {
+      if (bl.act) { bl.key = !persistent && bp.cardType !== 'monster' && segsJ[0] ? segsJ[0].charAt(0) : null; continue; }
+      const mm = bl.mm, isP = mm[3] === 'ペンデュラム', pool = isP ? psegsJ : segsJ, pre = isP ? 'P' : '';
+      if (mm[1]) bl.key = pre + mm[1];
+      else if (mm[2] != null) {
+        const q = nospace(mm[2]).slice(0, 10), seg = q && pool.find(x => nospace(x).includes(q));
+        if (seg) bl.key = pre + seg.charAt(0);
+        else if (pool.length <= 1) bl.key = pool.length ? pre + pool[0].charAt(0) : pre + 'M';
+      } else if (pool.length <= 1) bl.key = pool.length ? pre + pool[0].charAt(0) : pre + 'M';
+    }
+    // 텍스트가 바뀌어 인용문으로 찾을 수 없으면 효과 순서대로 맞춘다 (남은 블록 수 = 남은 효과 수일 때)
+    for (const isP of [false, true]) {
+      const pool = isP ? psegsJ : segsJ, pre = isP ? 'P' : '';
+      const rest = blocks.filter(bl => !bl.key && !bl.act && (bl.mm[3] === 'ペンデュラム') === isP);
+      if (!rest.length) continue;
+      const taken = new Set(blocks.filter(bl => bl.key).map(bl => bl.key));
+      const free = pool.map(x => pre + x.charAt(0)).filter(k => !taken.has(k));
+      if (free.length === rest.length) rest.forEach((bl, i) => { bl.key = free[i]; });
+    }
+    for (const bl of blocks) {
+      if (!bl.key || bl.act || (out[bl.key] && !out[bl.key].old)) continue;
+      const c = out[bl.key] = out[bl.key] || { lines: [], idx: [], old: true };
+      // 번호 없는 예전 텍스트에 효과가 여럿(「또한, 1턴에 1번, …」) 있으면 발동하는 효과의 분류를 우선
+      const ACTK = /誘発即時効果|誘発効果|起動効果|チェーンブロックの作られる効果|発動する効果/;
+      if (c.kind && ['continuous', 'nochain', 'rule'].includes(c.kind) && ACTK.test(bl.mm[5])) c.kind = null;
+      if (!c.kind) {
+        const kw = bl.mm[5], pre = bl.mm[4] || '';
+        c.kind = { '誘発即時効果': 'quick', '誘発効果': 'trigger', '起動効果': 'ignition', '永続効果': 'continuous', 'ルール効果': 'rule', 'チェーンブロックの作られない効果': 'nochain', 'チェーンブロックの作られる効果': 'chain', '発動する効果': 'chain', '適用する効果': 'continuous' }[kw] || null;
+        if (kw === 'いずれにも分類されない効果') c.kind = /発動/.test(bl.lines[0]) ? 'chain' : null;
+        c.loc = /手札・墓地|手札または墓地/.test(pre) ? 'handgy' : /手札/.test(pre) ? 'hand' : /墓地/.test(pre) ? 'gy' : /除外/.test(pre) ? 'banished' : /フィールド|ゾーン/.test(pre) ? 'field' : null;
+      }
+      c.lines.push(...bl.lines); c.idx = (c.idx || []).concat(bl.idx);
+      for (const ja of bl.lines) {
+        if (/必ず発動/.test(ja)) c.mand = true;
+        if (/ダメージステップ(?:中)?でも(?:発動|適用)/.test(ja)) c.dmg = true;
+        if (/ダメージステップ(?:中)?には(?:発動|適用)できません/.test(ja)) c.dmg = false;
+      }
+    }
     m._fc = out;
     return out;
   }
+  const OLD_FAQ_RE = /^(?:『([①-⑳])』|「[^」]*」|『([^』]*)』)?\s*(?:の?(ペンデュラム|モンスター)?効果は|は)?、?([^。]*?)(誘発即時効果|誘発効果|起動効果|永続効果|ルール効果|チェーンブロックの作られない効果|チェーンブロックの作られる効果|いずれにも分類されない効果|発動する効果|適用する効果)です/;
 
   const NK_KO = { nochain: '체인 블록을 만들지 않는 효과', continuous: '지속 효과', rule: '룰 효과' };
   const analyzeCache = new WeakMap();
@@ -1530,8 +1601,10 @@
       for (const x of psegs) put(mk(x, true));
       for (const x of segs) put(mk(x, false));
       if (!segs.length && !psegs.length && cls.ss && main) {
-        const textAct = isActivated(main), kind = effKind(main);
-        put({ label: '몬스터 효과', text: main, num: null, key: null, isChain: textAct, kind, ss: kind === 'quick' ? 2 : 1, nkind: textAct ? null : 'continuous', src: 'text', isAct: false, opt: isOptional(main), faqLines: [] });
+        const f = fc.M || {}, fk = f.kind || null;
+        const textAct = isActivated(main), isChain = fk ? !['nochain', 'continuous', 'rule'].includes(fk) : textAct;
+        const kind = ['quick', 'trigger', 'ignition'].includes(fk) ? fk : effKind(main);
+        put({ label: '몬스터 효과', text: main, num: null, key: 'M', isChain, kind, ss: kind === 'quick' ? 2 : 1, nkind: isChain ? null : (fk && fk !== 'chain' ? fk : 'continuous'), src: fk ? 'faq' : 'text', fkind: fk, isAct: false, opt: f.mand === true ? false : isOptional(main), dmgOK: f.dmg, faqLoc: f.loc, faqLines: f.lines || [], faqIdx: f.idx || [] });
       }
     }
     const r = { chain, nochain, all };
@@ -1560,6 +1633,24 @@
     return 'field';
   }
 
+  // 효과를 발동할 때 카드가 있는 위치 (코스트로 이동하기 전)
+  function actZone(m, e) {
+    if (!e) return 'unknown';
+    if (e.isAct) return 'field';
+    if (e.faqLoc && e.faqLoc !== 'handgy') return e.faqLoc;
+    const t = e.text;
+    if (/패에서 이 카드를|이 카드를 패에서|패의 이 카드를|이 카드가 패에 존재(?:하는|할|하고)|이 카드가 패에 있는|手札のこのカード|このカードを手札から|手札から(?:この|自身)|このカードが手札に存在する/.test(t)) return 'hand';
+    if (/묘지의 이 카드를|묘지에서 이 카드를|이 카드를 묘지에서|이 카드가 묘지에 존재(?:하는|할|하고)|이 카드가 묘지에 있는|이 카드가 묘지에 보내진|이 카드가 (?:[^.。]*?)묘지로 (?:보내졌을|버려졌을)|(?:파괴된|보내진) 이 카드가 묘지에|이 카드가 (?:[^.。]*?)묘지에 보내졌을|墓地のこのカード|このカードが墓地に(?:存在|送られた)/.test(t)) return 'gy';
+    if (/제외되어 있는 이 카드|제외 상태의 이 카드|이 카드가 제외되었을|이 카드가 제외되어 있는|이 카드가 제외 상태로|除外されているこのカード|このカードが除外された/.test(t)) return 'banished';
+    if (e.faqLoc === 'handgy') return 'hand';
+    if (textLang(m) !== 'ko') return 'unknown';
+    return 'field';
+  }
+  // 체인의 카드가 발동한 위치 (사용자가 고친 값 우선) / 발동 뒤(코스트 처리 뒤) 있는 위치
+  const linkActZone = (l) => { const e = linkEff(l); if (!e) return 'unknown'; if (e.isAct) return 'field'; return l.zone || actZone(l.m, e); };
+  const linkLoc = (l) => { const e = linkEff(l); if (!e) return 'unknown'; if (e.isAct) return 'field'; const c = costSpec(e); return c && c.self ? COST_LOC[c.type] : linkActZone(l); };
+  const zoneG = (loc) => (loc === 'set' || loc === 'field' || loc === 'unknown' || !loc) ? 'field' : loc;
+
   // ---------- 무효 효과가 다루는 대상 ----------
   // scope: monster / st / any,  zone: 대상으로 하는 위치,  oppOnly: 상대 카드만
   function negTarget(t) {
@@ -1579,8 +1670,6 @@
   const ACTIONS = ['특수 소환', '묘지로 보내', '제외', '패에 넣', '넣'];
   const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const SUMMON_ALT = /소환(?:할|될|하는|되는)\s*(?:때|시기)/;
-  const RACE_KO = { Dragon: '드래곤', Warrior: '전사', Spellcaster: '마법사', Fairy: '천사', Fiend: '악마', Zombie: '언데드', Machine: '기계', Aqua: '물', Pyro: '화염', Rock: '암석', 'Winged Beast': '비행야수', Plant: '식물', Insect: '곤충', Thunder: '번개', Beast: '야수', 'Beast-Warrior': '야수전사', Dinosaur: '공룡', Fish: '어류', 'Sea Serpent': '해룡', Reptile: '파충류', Psychic: '사이킥', 'Divine-Beast': '환신야수', 'Creator God': '창조신', Wyrm: '환룡', Cyberse: '사이버스', Illusion: '환상마' };
-  const KIND_EN = { 융합: 'Fusion', 싱크로: 'Synchro', 엑시즈: 'XYZ', 링크: 'Link', 의식: 'Ritual', 펜듈럼: 'Pendulum' };
   function parseClause(clause) {
     const hasM = /몬스터/.test(clause), hasS = /마법/.test(clause), hasT = /함정/.test(clause);
     let kind = 'any';
@@ -1600,7 +1689,7 @@
           let zone = null, zi = 1e9;
           for (const z of ZONES) { const k = line.indexOf(z); if (k >= 0 && k < zi) { zi = k; zone = z; } }
           const action = ACTIONS.find(a => line.includes(a));
-          if (zone && action) bullets.push({ label: line.replace(/\s*효과$/, ''), re: new RegExp(`${escRe(zone)}(?:에서|의|으로부터)[^.。]*?${escRe(action)}`) });
+          if (zone && action) bullets.push({ label: line.replace(/\s*효과$/, ''), re: new RegExp(`${escRe(zone)}(?:에서|의|으로부터)[^.。]*?${escRe(action).replace(/보내$/, '보[내낸냈]')}`) });
         }
       }
       return Object.assign(c, { bullets, summonAlt: SUMMON_ALT.test(body) });
@@ -1620,20 +1709,23 @@
     if (c.kind === 'stcard' && !(pe.isAct && pcls.kind !== 'monster')) return `마법·함정 카드의 발동에만 체인할 수 있습니다. 체인 ${i}은(는) ${pe.isAct ? pcls.label + '의 발동' : (pcls.kind === 'monster' ? '몬스터 효과' : '카드의 효과')}입니다.`;
     if (c.kind === 'st' && pcls.kind === 'monster') return `마법·함정의 발동에만 체인할 수 있습니다. 체인 ${i}은(는) 몬스터 효과입니다.`;
     if (c.opp && prev.ctrl === l.ctrl) return `상대가 발동한 효과에만 체인할 수 있습니다. 체인 ${i}은(는) 같은 플레이어가 발동했습니다.`;
-    if (c.field) { const loc = effLocation(prev.m, pe, pcls); if (loc !== 'field' && loc !== 'unknown') return `필드의 카드가 발동한 효과에만 체인할 수 있습니다. 체인 ${i}의 효과는 ${ZONE_KO[loc]}에서 발동합니다.`; }
+    if (c.field) { const loc = linkActZone(prev); if (loc !== 'field' && loc !== 'unknown') return `필드의 카드가 발동한 효과에만 체인할 수 있습니다. 체인 ${i}의 효과는 ${ZONE_KO[loc]}에서 발동합니다.`; }
     return null;
   }
 
 
   // ---------- 체인 0 · 상황 (체인 블록을 만들지 않는 행동) ----------
-  const EV_TYPES = [['none', '오픈 게임 상태'], ['summon', '몬스터를 소환할 때 (소환 무효 타이밍)'], ['summoned', '몬스터의 소환에 성공했을 때'], ['attack', '공격 선언시'], ['phase', '페이즈 진입시 (드로우·스탠바이·엔드 등)']];
+  const EV_TYPES = [['none', '오픈 게임 상태'], ['summon', '몬스터를 소환할 때 (소환 무효 타이밍)'], ['summoned', '몬스터의 소환에 성공했을 때'], ['attack', '공격 선언시'], ['battle', '몬스터가 전투로 파괴되었을 때'], ['phase', '페이즈 진입시 (드로우·스탠바이·엔드 등)']];
   const EV_SUB = [['normal', '일반 소환'], ['flip', '반전 소환'], ['special', '특수 소환 (소환 절차·소환 조건)'], ['effect', '효과에 의한 특수 소환']];
   const SUB_KO = Object.fromEntries(EV_SUB);
+  const BATTLE_SUB = [['destroyed', '전투로 파괴된 몬스터'], ['destroyer', '상대 몬스터를 전투로 파괴한 몬스터'], ['damage', '상대에게 전투 데미지를 준 몬스터']];
+  const battleRole = (sub) => BATTLE_SUB.some(x => x[0] === sub) ? sub : 'destroyed';
   const EV_HELP = {
     summon: '일반·반전 소환과 소환 절차에 의한 특수 소환은 체인 블록을 만들지 않습니다. 이 타이밍에는 「신의 심판」·「신의 경고」처럼 소환을 무효로 하는 효과만 체인 1로 발동할 수 있고, 거기에 다시 체인할 수 있습니다.',
     summoned: '소환에 성공한 직후입니다. 소환으로 유발된 효과와 「소환에 성공했을 때」 발동하는 카드, 스펠 스피드 2 이상의 효과를 발동할 수 있습니다. 기동 효과는 바로 발동할 수 없습니다 (공식 Q&A #10040).',
     attack: '공격 선언은 체인 블록을 만들지 않습니다. 「공격 선언시」 발동하는 효과와 스펠 스피드 2 이상의 효과를 발동할 수 있습니다.',
-    phase: '페이즈 진입은 체인 블록을 만들지 않습니다. 그 페이즈에 유발된 효과와 스펠 스피드 2 이상의 효과를 발동할 수 있습니다.'
+    phase: '페이즈 진입은 체인 블록을 만들지 않습니다. 그 페이즈에 유발된 효과와 스펠 스피드 2 이상의 효과를 발동할 수 있습니다.',
+    battle: '데미지 스텝 종료시(전투 데미지는 데미지 계산 후)입니다. 그 몬스터의 「전투로 파괴되었을 / 전투로 파괴했을 / 전투 데미지를 주었을 경우」 효과와 다른 카드의 유발 효과가 동시에 유발되어 체인 1부터 쌓입니다. 아래 「동시 유발 정리」에 자동으로 들어갑니다.'
   };
   function summonNeg(t) {
     const body = String(t || '');
@@ -1721,7 +1813,7 @@
     const cls = classify(l.m), e = linkEff(l);
     const cat = cls.kind === 'monster' ? 'mon' : cls.kind;
     if (!o[cat]) return false;
-    if (o.where === 'field' && effLocation(l.m, e, cls) !== 'field') return false;
+    if (o.where === 'field' && zoneG(linkActZone(l)) !== 'field') return false;
     if (o.whose === 'opp' && l.ctrl === o.ctrl) return false;
     if (o.whose === 'self' && l.ctrl !== o.ctrl) return false;
     return true;
@@ -1786,7 +1878,7 @@
     if (scope === 'st' && tcls.kind === 'monster') return `마법·함정만 무효로 할 수 있습니다. 체인 ${j + 1}은(는) 몬스터 효과입니다.`;
     if (nt) {
       if (nt.oppOnly && tgt.ctrl === l.ctrl) return `상대의 카드만 대상으로 할 수 있습니다. 체인 ${j + 1}은(는) 같은 플레이어의 카드입니다.`;
-      const loc = effLocation(tgt.m, te, tcls);
+      const loc = linkLoc(tgt);
       if (nt.zone && loc !== 'unknown' && nt.zone !== loc) return `${ZONE_KO[nt.zone]}의 카드만 대상으로 할 수 있습니다. 체인 ${j + 1} 「${nameOf(tgt.m)}」는 효과를 발동한 뒤 ${ZONE_KO[loc]}에 있으므로 대상으로 할 수 없습니다.`;
     }
     return null;
@@ -1929,6 +2021,27 @@
         else r.err.push('이번 턴에 세트한 함정·속공 마법은 발동할 수 없습니다.');
       }
 
+      // 3-1. 페이즈 (기동 효과·스펠 스피드 1 마법은 메인 페이즈 / 텍스트에 적힌 페이즈·타이밍)
+      {
+        const PH = CH.phase || 'main1', inMain = PH === 'main1' || PH === 'main2', phKo = PHASE_KO[PH] + (CH.dmg ? '(데미지 스텝)' : '');
+        if ((e.kind === 'ignition' && !e.isAct) || (e.isAct && cls.kind === 'spell' && cls.ss === 1)) {
+          if (!inMain) r.err.push(`${e.isAct ? '스펠 스피드 1 마법 카드' : '기동 효과'}는 메인 페이즈에만 발동할 수 있습니다. 지금은 ${phKo}입니다.`);
+        }
+        const head = normOld(((e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '').split(/[.。]/).pop());
+        const PH_REQ = [
+          [/메인 페이즈(?:\s*[12])?(?:에|중에|중|동안)(?!\s*발동한)/, ['main1', 'main2'], '메인 페이즈'],
+          [/배틀 페이즈(?:에|중에|중|동안|개시시)(?!\s*발동한)/, ['battle'], '배틀 페이즈'],
+          [/스탠바이 페이즈(?:에|시)/, ['standby'], '스탠바이 페이즈'],
+          [/엔드 페이즈(?:에|시)/, ['end'], '엔드 페이즈'],
+          [/드로우 페이즈(?:에|시)/, ['draw'], '드로우 페이즈']
+        ];
+        const need = PH_REQ.filter(([re]) => re.test(head));
+        if (need.length && !need.some(([, ok]) => ok.includes(PH))) r.err.push(`${need.map(x => x[2]).join(' / ')}에 발동하는 효과입니다. 지금은 ${phKo}입니다. 상단에서 페이즈를 바꾸세요.`);
+        if (/데미지 계산(?:시|전)|데미지 스텝(?: 개시시)?에/.test(head) && !CH.dmg) r.err.push('데미지 스텝(데미지 계산시)에 발동하는 효과입니다. 상단의 「데미지 스텝 중」을 켜세요.');
+        if (/공격 선언(?:시|했을|한 때|된 때|되었을)|공격 대상으로 (?:선택|지정)/.test(head) && PH !== 'battle') r.err.push(`공격 선언시에 발동하는 효과입니다. 지금은 ${phKo}입니다. 위 「체인 0 · 상황」을 「공격 선언시」로 설정하세요.`);
+        else if (/공격 선언(?:시|했을|한 때|된 때|되었을)/.test(head) && i === 0 && CH.ev.type !== 'attack' && !CH.dmg) r.info.push('공격 선언시의 효과입니다. 위 「체인 0 · 상황」을 「공격 선언시」로 두면 공격하는 몬스터와 플레이어를 함께 판정합니다.');
+      }
+
       // 4. 데미지 스텝
       if (CH.dmg && e.dmgOK === false) r.err.push('공식 FAQ: 이 효과는 데미지 스텝에는 발동할 수 없습니다.');
       else if (CH.dmg && e.dmgOK !== true && !(ss === 3 || e.kind === 'trigger' || DMG_OK.test(e.text)))
@@ -1947,14 +2060,16 @@
       {
         const sm = summonSpec(e);
         if (sm && sm.mode === 'pick') for (const kid of (l.sumK || [])) {
-          const sm2 = cardCache.get(kid), pd = sm2 && sm2.pd; if (!pd) continue;
-          const nm = `「${nameOf(sm2)}」`, raceKo = RACE_KO[pd.race], type = String(pd.type || '');
+          const sm2 = cardCache.get(kid); if (!sm2) continue;
+          const props = (sm2.base.properties || []).map(c => PROP[c]).filter(Boolean);
+          const raceKo = ((props.find(p => p[0] === 'race') || [])[1] || '').replace(/족$/, ''), types = props.filter(p => p[0] === 'type').map(p => p[1]);
+          const lv = Number(sm2.base.level) || null, nm = `「${nameOf(sm2)}」`;
           if (sm.race && raceKo && raceKo !== sm.race) r.err.push(`${nm}은(는) ${raceKo}족이라 소환할 수 없습니다. 이 효과는 ${sm.race}족 몬스터만 특수 소환합니다.`);
-          if (sm.kind && KIND_EN[sm.kind] && !type.includes(KIND_EN[sm.kind])) r.err.push(`${nm}은(는) ${sm.kind} 몬스터가 아니라 소환할 수 없습니다.`);
-          if (sm.from === '엑스트라 덱' && !/Fusion|Synchro|XYZ|Link/.test(type)) r.err.push(`${nm}은(는) 엑스트라 덱의 몬스터가 아닙니다.`);
+          if (sm.kind && types.length && !types.includes(sm.kind)) r.err.push(`${nm}은(는) ${sm.kind} 몬스터가 아니라 소환할 수 없습니다.`);
+          if (sm.from === '엑스트라 덱' && types.length && !types.some(t => ['융합', '싱크로', '엑시즈', '링크'].includes(t)) && !types.includes('펜듈럼')) r.err.push(`${nm}은(는) 엑스트라 덱의 몬스터가 아닙니다.`);
           if (sm.sameLv) {
-            const t0 = (l.tg || [])[0], tb = t0 && boardItems().find(b => b.id === t0), tlv = tb && tb.m.pd && tb.m.pd.level;
-            if (tlv && pd.level && tlv !== pd.level) r.err.push(`${nm}은(는) 레벨 ${pd.level}이라 소환할 수 없습니다. 대상 「${nameOf(tb.m)}」와 같은 레벨 ${tlv}의 몬스터만 특수 소환합니다.`);
+            const t0 = (l.tg || [])[0], tb = t0 && boardItems().find(b => b.id === t0), tlv = tb && Number(tb.m.base.level);
+            if (tlv && lv && tlv !== lv) r.err.push(`${nm}은(는) 레벨 ${lv}이라 소환할 수 없습니다. 대상 「${nameOf(tb.m)}」와 같은 레벨 ${tlv}의 몬스터만 특수 소환합니다.`);
           }
         }
       }
@@ -2006,8 +2121,9 @@
   // ======================================================================
   // 필드 · 처리 시뮬레이션 (대상 소실 / 대체 효과 / 카드 이동 / 타이밍 놓침)
   // ======================================================================
-  const ACT_KO = { destroy: '파괴', banish: '제외', hand: '패로 되돌림', deck: '덱으로 되돌림', gy: '묘지로 보냄' };
-  const LOC_AFTER = { destroy: 'gy', banish: 'banished', hand: 'hand', deck: 'deck', gy: 'gy' };
+  const ACT_KO = { destroy: '파괴', banish: '제외', hand: '패로 되돌림', deck: '덱으로 되돌림', gy: '묘지로 보냄', search: '패에 넣음', discard: '버림', control: '컨트롤을 얻음', facedown: '뒷면 수비 표시로 함' };
+  const LOC_AFTER = { destroy: 'gy', banish: 'banished', hand: 'hand', deck: 'deck', gy: 'gy', search: 'hand', discard: 'gy', control: null, facedown: 'set' };
+  const FROM_KO = { deck: '덱', extra: '엑스트라 덱', hand: '패' };
   const LOC_KO2 = { field: '필드', set: '필드(세트)', gy: '묘지', banished: '제외', hand: '패', deck: '덱' };
   const onField = (b) => b && (b.loc === 'field' || b.loc === 'set');
 
@@ -2030,15 +2146,20 @@
   function linkAction(e) {
     if (!e) return null;
     const r = immediatePart(e.text);
-    const cands = [['destroy', /파괴한다|파괴하고|파괴할 수 있다/], ['banish', /제외한다|제외하고/], ['hand', /패로 되돌린다|패로 되돌리고|패에 되돌/], ['deck', /덱으로 되돌린다|덱으로 되돌리고|덱에 되돌/], ['gy', /묘지로 보낸다|묘지로 보내고/]];
+    const cands = [['destroy', /파괴한다|파괴하고|파괴할 수 있다/], ['banish', /제외한다|제외하고|제외할 수 있다/], ['hand', /패로 되돌린다|패로 되돌리고|패에 되돌/], ['deck', /덱으로 되돌린다|덱으로 되돌리고|덱에 되돌|덱 (?:맨 )?(?:위|아래)(?:에|로) 되돌/], ['gy', /묘지로 보낸다|묘지로 보내고|묘지로 보낼 수 있다/],
+      ['search', /패에 넣는다|패에 넣고|패에 넣을 수 있다|패에 더한다/], ['discard', /버린다|버리고(?!\s*발동)/], ['control', /컨트롤을 얻는다|컨트롤을 얻고/], ['facedown', /뒷면 (?:수비 )?표시로 한다|뒷면 (?:수비 )?표시로 하고/]];
     let best = null, bi = 1e9;
     for (const [k, re] of cands) { const mm = r.match(re); if (mm && mm.index < bi) { bi = mm.index; best = k; } }
     if (!best) return null;
+    if (best === 'search' && /묘지|제외|대상|그 (?:몬스터|카드)|필드/.test(r.slice(Math.max(0, bi - 40), bi))) best = 'hand';
     // 그 처리의 목적어 (직전 「.」「,」 뒤부터 동사까지)
     const head = r.slice(0, bi), cut = Math.max(head.lastIndexOf('.'), head.lastIndexOf('。'), head.lastIndexOf(','), head.lastIndexOf('，'));
     const obj = head.slice(cut + 1);
+    // 덱·패·엑스트라 덱처럼 공개되지 않은 곳의 카드 (보드에 없음 → 처리한 카드를 직접 넣음)
+    const from = /엑스트라 덱에서|엑스트라 덱의/.test(obj) ? 'extra' : (/덱에서|덱의 (?:위|맨 위)|덱 위에서/.test(obj) ? 'deck' : (/패에서|패를|패의/.test(obj) && !/이 카드/.test(obj) ? 'hand' : null));
+    if ((best === 'search' || best === 'discard') && !from && !/이 카드|묘지|제외|필드|대상|그 (?:몬스터|카드)/.test(obj)) return { type: best, then: /그 후|그 뒤/.test(r.slice(bi)), from: best === 'search' ? 'deck' : 'hand', obj };
     return {
-      type: best, then: /그 후|그 뒤/.test(r.slice(bi)),
+      type: best, then: /그 후|그 뒤/.test(r.slice(bi)), from, obj,
       // 「이 카드를 엑스트라 덱으로 되돌리고」: 대상이 아니라 자기 자신을 처리
       self: /이 카드(?:를|을)?/.test(obj) && !/이 카드 이외/.test(obj),
       // 「그 소환을 무효로 하고, 그 몬스터를 파괴한다」: 소환하려던 몬스터
@@ -2046,6 +2167,17 @@
       extra: /엑스트라 덱/.test(obj + r.slice(bi, bi + 12))
     };
   }
+  // 카드 이동이 없는 처리의 요약 (드로우·데미지·공격력 변동 등)
+  const SUMMARY = [[/드로우한다|드로우하고/, '드로우'], [/데미지를 준다|데미지를 주고/, '데미지'], [/회복한다|회복하고/, 'LP 회복'], [/LP를[^.。]*?(?:잃는다|지불한다|된다)/, 'LP 변동'],
+    [/(?:공격력|수비력)[^.。]*?(?:올린다|내린다|오른다|내려간다|된다|한다|0이 된다)/, '공격력·수비력 변동'], [/장착한다|장착하고/, '장착'], [/표시 형식을 변경|수비 표시로 한다|공격 표시로 한다|앞면 (?:공격|수비) 표시로/, '표시 형식 변경'],
+    [/레벨을|레벨은|랭크는|랭크를/, '레벨·랭크 변경'], [/카운터를/, '카운터'], [/발동할 수 없다|공격할 수 없다|소환할 수 없다|특수 소환할 수 없다|대상으로 할 수 없다|파괴되지 않는다|받지 않는다/, '제한·내성 부여'],
+    [/세트한다|세트하고/, '세트'], [/엑시즈 소재로 한다|소재로 한다/, '엑시즈 소재로 함'], [/카드명을 선언|선언한다/, '선언'], [/코인|주사위/, '코인·주사위'], [/덱 (?:맨 )?위|덱을 섞는다|셔플/, '덱 조작'],
+    [/전투 데미지[^.。]*?0/, '전투 데미지 0'], [/공격 대상을|공격을 무효|배틀 페이즈를 종료/, '공격·전투 조작'], [/컨트롤/, '컨트롤 변경'], [/효과를 무효|무효로 한다/, '효과 무효'], [/카드명은|카드명을/, '카드명 변경'], [/속성을|종족을/, '속성·종족 변경']];
+  function resolveSummary(t) {
+    const r = immediatePart(t);
+    return SUMMARY.filter(([re]) => re.test(r)).map(([, k]) => k).filter((x, i, a) => a.indexOf(x) === i);
+  }
+
   // 대상(또는 영향 받는 카드)의 조건
   function targetSpec(e) {
     const t = String(e.text || ''), r = resolvePart(t);
@@ -2053,22 +2185,27 @@
     let obj, max = 1, targeting = false;
     if (tm) { obj = tm[1].split(/[,，]/).pop(); max = tm[2] ? +tm[2] : 1; targeting = true; }
     else {
-      const am = r.match(/([^.。]*?)(?:를|을)?\s*(?:전부|모두)?\s*(?:파괴|제외|패로 되돌|덱으로 되돌|묘지로 보내)/);
+      const am = r.match(/([^.。]*?)(?:를|을)?\s*(?:전부|모두)?\s*(?:파괴|제외|패로 되돌|덱으로 되돌|묘지로 보[내낸])/);
       obj = am ? am[1] : r;
       const nm = obj.match(/(\d+)장/);
       max = /전부|모두/.test(r) ? 99 : (nm ? +nm[1] : 1);
     }
     const hasM = /몬스터/.test(obj), hasST = /마법|함정/.test(obj);
+    const zones = [];
+    if (/필드|앞면 표시|뒷면 표시|세트된|몬스터 존|마법 & 함정 존|마법\s*\/\s*함정 존/.test(obj)) zones.push('field');
+    if (/묘지/.test(obj)) zones.push('gy');
+    if (/제외(?:되어 있는|된|\s*상태)/.test(obj)) zones.push('banished');
+    if (!zones.length) zones.push('field');
     return {
       targeting, max, cat: hasM && !hasST ? 'mon' : (hasST && !hasM ? 'st' : 'any'),
       whose: /상대/.test(obj) && !/자신|서로/.test(obj) ? 'opp' : (/자신/.test(obj) && !/상대/.test(obj) ? 'self' : 'both'),
-      zone: /묘지/.test(obj) ? 'gy' : 'field', faceup: /앞면 표시/.test(obj),
+      zones, zone: zones.length === 1 ? zones[0] : (zones.includes('field') ? 'field' : zones[0]), faceup: /앞면 표시/.test(obj),
       // 「이 카드를 패로 되돌린다」처럼 자기 자신을 처리
       self: !targeting && /이 카드/.test(obj) && !/이 카드 이외/.test(obj),
       // 「공격력이 가장 높은 몬스터」처럼 처리 시점에 정해지는 카드
       pick: !targeting ? (/가장 높은/.test(obj) ? 'max' : (/가장 낮은/.test(obj) ? 'min' : null)) : null,
       stat: /수비력/.test(obj) ? 'def' : 'atk',
-      optional: /(?:파괴|제외|되돌|보낼|보낼) 수 있다|할 수 있다/.test(r.slice(r.search(/파괴|제외|되돌|묘지로 보내/)))
+      optional: /(?:파괴|제외|되돌|보낼|보낼) 수 있다|할 수 있다/.test(r.slice(r.search(/파괴|제외|되돌|묘지로 보[내낸]/)))
     };
   }
 
@@ -2077,16 +2214,21 @@
   function summonSpec(e) {
     if (!e || e.isAct && false) return null;
     const r = resolvePart(e.text);
-    const mm = r.match(/([^.。]*?)\s*특수 소환(?:한다|하고|할 수 있다)/);
+    let mm = r.match(/([^.。]*?)\s*특수 소환(?:한다|하고|할 수 있다)/), perform = null;
+    if (!mm) {
+      const pm = r.match(/([^.。]*?)\s*(융합|싱크로|엑시즈|링크|의식) 소환(?:한다|하고|할 수 있다|을 실행한다|을 한다|을 실행할 수 있다|을 할 수 있다|을 실행하고|을 하고)/);
+      if (pm) { mm = pm; perform = pm[2]; }
+    }
     if (!mm) return null;
     const obj = mm[1].split(/[,，]/).pop();   // 「이 카드를 엑스트라 덱으로 되돌리고, ○○를 특수 소환한다」의 앞 처리 제외
     const n = (obj.match(/(\d+)장/) || [])[1];
     const after = r.slice(r.indexOf(mm[0]) + mm[0].length);
-    const as = (obj.match(/(융합|싱크로|엑시즈|링크|의식) 소환으로 취급/) || [])[1] || null;
+    const as = perform || (obj.match(/(융합|싱크로|엑시즈|링크|의식) 소환으로 취급/) || [])[1] || null;
     const race = (obj.match(/(\S+)족/) || [])[1] || null;
     const kind = (obj.match(/(융합|싱크로|엑시즈|링크|의식|펜듈럼) 몬스터/) || [])[1] || null;
     return {
-      mode: /이 카드를/.test(obj) ? 'self' : (/(?:그 몬스터|그 카드|대상 몬스터|대상으로 한 몬스터)(?:를|을)/.test(obj) ? 'target' : 'pick'),
+      perform,
+      mode: /이 카드를/.test(obj) && !perform ? 'self' : (/(?:그 몬스터|그 카드|대상 몬스터|대상으로 한 몬스터)(?:를|을)/.test(obj) ? 'target' : 'pick'),
       n: n ? +n : 1, opp: /상대 필드에/.test(obj), then: /그 후|그 뒤/.test(after),
       optional: /특수 소환할 수 있다/.test(r),
       as, race, kind, sameLv: /대상 몬스터와 같은 레벨|그 몬스터와 같은 레벨/.test(obj),
@@ -2096,44 +2238,58 @@
 
   // ---------- 발동 시 코스트 ----------
   // 「이 카드를 패에서 버리고」「패를 1장 버리고」「자신 필드의 몬스터 1장을 릴리스하고」 등
-  const COST_LOC = { discard: 'gy', gy: 'gy', banish: 'banished' };
-  const COST_KO = { discard: '버림', gy: '묘지로 보냄', banish: '제외' };
+  const COST_LOC = { discard: 'gy', gy: 'gy', banish: 'banished', release: 'gy', deck: 'deck' };
+  const COST_KO = { discard: '버림', gy: '묘지로 보냄', banish: '제외', release: '릴리스', deck: '덱으로 되돌림', lp: 'LP 지불', detach: '엑시즈 소재 제거', reveal: '공개' };
   function costSpec(e) {
     if (!e) return null;
     const body = String(e.text || '').replace(/^[\u2460-\u2473]\s*[:：]\s*/, '');
     const head = (body.match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1];
     if (!head) return null;
     const sent = head.split(/[.。]/).pop();
-    const typeOf = (v) => /제외/.test(v) ? 'banish' : (/버리/.test(v) ? 'discard' : 'gy');
-    let m = sent.match(/이 카드를\s*(?:패에서\s*|필드에서\s*|묘지에서\s*)?(버리고|묘지로 보내고|제외하고|릴리스하고)/);
+    const typeOf = (v) => /제외/.test(v) ? 'banish' : (/버리/.test(v) ? 'discard' : (/릴리스/.test(v) ? 'release' : (/되돌리/.test(v) ? 'deck' : 'gy')));
+    // 카드가 이동하지 않는 코스트
+    if (/지불하고/.test(sent) && /LP|라이프/.test(sent)) { const num = (sent.match(/\d[\d,]*/) || [])[0]; return { self: false, zone: 'none', n: 0, type: 'lp', text: /절반/.test(sent) ? 'LP 절반' : (num ? num + ' LP' : 'LP') }; }
+    if (/소재[^,，]*?제거하고/.test(sent)) return { self: false, zone: '소재', n: +((sent.match(/(\d+)개/) || [])[1] || 1), type: 'detach' };
+    if (/(?:공개하고|보여주고)\s*$/.test(sent.trim()) || /(?:공개하고|보여주고)[,，]?\s*(?:[^,，]*?)$/.test(sent)) {
+      if (!/버리고|묘지로 보내고|제외하고|릴리스하고/.test(sent)) return { self: /이 카드를/.test(sent), zone: 'none', n: 0, type: 'reveal' };
+    }
+    let m = sent.match(/이 카드를\s*(?:패에서\s*|필드에서\s*|묘지에서\s*|제외 상태에서\s*)?(버리고|묘지로 보내고|제외하고|릴리스하고|덱으로 되돌리고|덱 (?:맨 )?(?:위|아래)(?:에|로) 되돌리고)/);
     if (m) return { self: true, type: typeOf(m[1]) };
-    m = sent.match(/(패|엑스트라 덱|덱|묘지|필드)[^,，.。]*?(?:(\d+)장(?:을|를)?)?\s*(버리고|묘지로 보내고|제외하고|릴리스하고)/);
+    m = sent.match(/(패|엑스트라 덱|덱|묘지|필드|제외되어 있는|제외 상태)[^,，.。]*?(?:(\d+)장(?:을|를)?)?\s*(버리고|묘지로 보내고|제외하고|릴리스하고|덱으로 되돌리고|덱에 되돌리고)/);
+    if (m && /^제외/.test(m[1])) m[1] = '제외';
     if (m) return { self: false, zone: m[1] === '필드' || /릴리스/.test(m[3]) ? 'field' : m[1], n: m[2] ? +m[2] : 1, type: typeOf(m[3]) };
     m = sent.match(/(\d+)장을?\s*릴리스하고/);
     if (m) return { self: false, zone: 'field', n: +m[1], type: 'gy' };
     return null;
   }
-  const linkOnField = (l) => { const e = linkEff(l); if (!e) return false; if (e.isAct) return true; return effLocation(l.m, e, classify(l.m)) === 'field'; };
+  const linkOnField = (l) => zoneG(linkActZone(l)) === 'field';
   // 필드(와 묘지)에 있는 카드: 「필드의 카드」 칸 + 필드에서 발동한 체인의 카드
   function boardItems() {
     const items = [];
     CH.out.forEach(o => { if (o.m) items.push({ id: 'B' + o.uid, m: o.m, kid: o.kid, ctrl: o.ctrl, loc: o.loc || 'field', out: o }); });
     CH.links.forEach(l => {
       if (!l.m) return;
+      const e = linkEff(l); if (!e) return;
       if (!linkOnField(l)) {
-        const c = costSpec(linkEff(l));
-        if (c && c.self) items.push({ id: 'L' + l.uid, m: l.m, kid: l.kid, ctrl: l.ctrl, loc: COST_LOC[c.type], link: l, costed: true });
+        // 패·묘지·제외 상태에서 발동: 발동 위치(origin)와 코스트 처리 뒤 위치(loc)
+        const z = linkActZone(l), c = costSpec(e), self = !!(c && c.self);
+        const same = items.find(b => b.out && !b.link && b.kid === l.kid && b.ctrl === l.ctrl && b.loc === z);
+        if (same) { same.link = l; same.origin = z; same.loc = self ? COST_LOC[c.type] : z; same.costed = self; return; }
+        items.push({ id: 'L' + l.uid, m: l.m, kid: l.kid, ctrl: l.ctrl, loc: self ? COST_LOC[c.type] : z, origin: z, link: l, costed: self });
         return;
       }
-      const e = linkEff(l);
       // 필드 칸에 같은 카드가 이미 있으면 (앞면 카드의 효과 발동) 그 카드로 본다
-      if (!e.isAct && items.some(b => b.out && b.kid === l.kid && b.ctrl === l.ctrl && onField(b))) return;
-      items.push({ id: 'L' + l.uid, m: l.m, kid: l.kid, ctrl: l.ctrl, loc: 'field', link: l });
+      const same = !e.isAct && items.find(b => b.out && !b.link && b.kid === l.kid && b.ctrl === l.ctrl && onField(b));
+      if (same) { same.link = l; return; }
+      items.push({ id: 'L' + l.uid, m: l.m, kid: l.kid, ctrl: l.ctrl, loc: 'field', origin: 'field', link: l });
     });
     return items;
   }
+  const inZones = (spec, b) => (spec.zones || [spec.zone || 'field']).some(z => z === 'field' ? onField(b) : b.loc === z);
+  // 체인의 카드 자신 (보드 칸)
+  const ownItem = (board, l) => board.get('L' + l.uid) || [...board.values()].find(b => b.link === l) || [...board.values()].find(b => b.out && b.kid === l.kid && b.ctrl === l.ctrl && onField(b));
   function candMatch(spec, b, l) {
-    if (spec.zone === 'gy' ? b.loc !== 'gy' : !onField(b)) return false;
+    if (!inZones(spec, b)) return false;
     if (spec.faceup && b.loc === 'set') return false;
     const isMon = classify(b.m).kind === 'monster';
     if (spec.cat === 'mon' && !isMon) return false;
@@ -2186,25 +2342,30 @@
     const board = new Map(boardItems().map(b => [b.id, Object.assign({}, b, { pending: !!(b.link && isPersistentAct(b.link)) })]));
     const events = [], usedRepl = new Set();
     // 발동 시 코스트 (체인 1부터 발동 순서대로). 체인 블록 처리보다 먼저 일어난다
+    const tgSnap = L.map(() => ({}));
     L.forEach((l, i) => {
       if (st[i].s === 'invalid' || !l.m) return;
+      // 대상은 발동할 때 정해진다: 그 시점의 위치를 기억 (뒤 체인의 코스트로 이동하면 불발)
+      (l.tg || []).forEach(id => { const b = board.get(id); if (b) tgSnap[i][id] = zoneG(b.loc); });
       const c = costSpec(linkEff(l));
       if (!c) return;
+      if (c.type === 'lp' || c.type === 'reveal' || c.type === 'detach') { st[i].notes.push(`발동할 때 코스트로 ${COST_KO[c.type]}${c.type === 'lp' && c.text ? ' (' + c.text + ')' : ''}.`); return; }
       const moved = [];
       if (c.self) {
         const b = board.get('L' + l.uid);
         if (b && b.costed) moved.push(b);
         else if (b && onField(b)) { b.loc = COST_LOC[c.type]; moved.push(b); }
       } else {
-        (l.costB || []).forEach(id => { const b = board.get(id); if (b && onField(b)) { b.loc = COST_LOC[c.type]; moved.push(b); } });
+        const czone = { field: 'field', '묘지': 'gy', '패': 'hand', '제외': 'banished' }[c.zone];
+        (l.costB || []).forEach(id => { const b = board.get(id); if (b && czone && zoneG(b.loc) === czone) { const from = b.loc; b.loc = COST_LOC[c.type]; moved.push(b); b._from = from; } });
         (l.costK || []).forEach((kid, n) => {
           const m = cardCache.get(kid); if (!m) return;
           const b = { id: 'K' + l.uid + '_' + n, m, kid, ctrl: l.ctrl, loc: COST_LOC[c.type] };
           board.set(b.id, b); moved.push(b);
         });
       }
-      moved.forEach(b => events.push({ id: b.id, b, type: c.type, pos: 0, i, cost: true, fromField: !b.costed && !String(b.id).startsWith('K') }));
-      if (moved.length) st[i].notes.push(`발동할 때 코스트로 ${moved.map(b => '「' + nameOf(b.m) + '」').join('·')}을(를) ${c.type === 'banish' ? '제외했습니다' : (c.type === 'discard' ? '버렸습니다' : '묘지로 보냈습니다')}.`);
+      moved.forEach(b => events.push({ id: b.id, b, type: c.type, pos: 0, i, cost: true, fromField: !b.costed && !String(b.id).startsWith('K') && zoneG(b._from || 'field') === 'field' }));
+      if (moved.length) st[i].notes.push(`발동할 때 코스트로 ${moved.map(b => '「' + nameOf(b.m) + '」').join('·')}을(를) ${{ banish: '제외했습니다', discard: '버렸습니다', release: '릴리스했습니다', deck: '덱으로 되돌렸습니다' }[c.type] || '묘지로 보냈습니다'}.`);
     });
     let pos = 0;
     for (let i = L.length - 1; i >= 0; i--) {
@@ -2214,7 +2375,7 @@
       S.pos = pos;
       // 지속·장착·필드 마법 / 지속 함정은 처리 전에 필드를 벗어나면 적용되지 않음
       if (S.s === 'ok' && e && e.isAct) {
-        const own = board.get('L' + l.uid), cls = classify(l.m), p = l.m.base.property || 'normal';
+        const own = ownItem(board, l), cls = classify(l.m), p = l.m.base.property || 'normal';
         const persistent = (cls.kind === 'spell' && ['continuous', 'field', 'equip'].includes(p)) || (cls.kind === 'trap' && p === 'continuous');
         if (persistent && own && !onField(own)) { S.s = 'gone'; S.notes.push(`처리 전에 이 카드가 ${LOC_KO2[own.loc]}(으)로 이동해, 효과는 적용되지 않습니다.`); }
       }
@@ -2222,8 +2383,8 @@
       const tg = (l.tg || []).filter(id => board.has(id));
       const spec = e ? targetSpec(e) : null;
       if (S.s === 'ok' && spec && spec.targeting && tg.length) {
-        const alive = tg.filter(id => onField(board.get(id)) || (spec.zone === 'gy' && board.get(id).loc === 'gy'));
-        if (!alive.length) { S.s = 'fizzle'; S.notes.push('대상이 모두 이미 이동해 효과가 적용되지 않습니다 (불발).'); }
+        const alive = tg.filter(id => { const b = board.get(id); return inZones(spec, b) && (!tgSnap[i][id] || tgSnap[i][id] === zoneG(b.loc)); });
+        if (!alive.length) { S.s = 'fizzle'; S.notes.push(`대상이 모두 이미 이동해 효과가 적용되지 않습니다 (불발).${tg.some(id => zoneG(board.get(id).loc) !== 'field') ? ' 묘지·제외 상태의 카드를 대상으로 했다면, 그 카드가 다른 위치로 이동한 경우도 같습니다.' : ''}`); }
         else if (alive.length < tg.length) S.notes.push(`대상 중 ${tg.length - alive.length}장이 이미 이동해, 남은 대상에만 적용합니다.`);
       }
       if (S.s === 'ok') { const f = allFx(vo).find(x => x.mode === 'apply' && x.target === l.uid); if (f) { S.s = 'negApply'; S.fx = f; } }
@@ -2243,14 +2404,25 @@
       // 효과 처리: 카드 이동
       if (S.s === 'ok' && e) {
         const act = linkAction(e);
-        let victims = act && act.ref === 'summon' ? [] : tg.filter(id => onField(board.get(id)));
+        if (act && act.from) {
+          // 덱·패·엑스트라 덱의 카드: 체인 카드에 넣은 카드로 계산
+          const moved = (l.movK || []).map((kid, n) => {
+            const m = cardCache.get(kid); if (!m) return null;
+            const b = { id: 'M' + l.uid + '_' + n, m, kid, ctrl: /상대(?:의)? 패|상대의 덱|상대 덱/.test(act.obj || '') ? (l.ctrl === 'me' ? 'opp' : 'me') : l.ctrl, loc: LOC_AFTER[act.type], from: act.from };
+            board.set(b.id, b); return b;
+          }).filter(Boolean);
+          moved.forEach(b => events.push({ id: b.id, b, type: act.type, pos, i, then: act.then, fromField: false, from: act.from }));
+          if (moved.length) S.notes.push(`${moved.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${FROM_KO[act.from]}에서 ${{ gy: '묘지로 보내집니다', banish: '제외됩니다', search: '패에 넣어집니다', discard: '버려집니다', destroy: '파괴되어 묘지로 보내집니다', hand: '패에 넣어집니다' }[act.type] || ACT_KO[act.type]}.`);
+          else S.notes.push(`${FROM_KO[act.from]}에서 ${ACT_KO[act.type]}하는 카드를 체인 카드에 넣으면, 그 카드의 유발 효과(「묘지로 보내졌을 경우」 등)와 타이밍 놓침을 계산합니다.`);
+        }
+        let victims = act && act.from ? [] : act && act.ref === 'summon' ? [] : tg.filter(id => { const b = board.get(id); return spec && spec.targeting ? (inZones(spec, b) && (!tgSnap[i][id] || tgSnap[i][id] === zoneG(b.loc))) : onField(b); });
         if (act && act.ref === 'summon') {
           // 소환 무효와 함께 하는 처리: 소환하려던 몬스터가 대상 (필드의 다른 카드가 아님)
         } else if (act && ((spec && spec.self) || act.self)) {
-          // 「이 카드를 패로 되돌린다」: 자기 자신
-          const own = board.get('L' + l.uid) || [...board.values()].find(b => b.out && b.kid === l.kid && b.ctrl === l.ctrl && onField(b));
-          victims = own && onField(own) ? [own.id] : [];
-          if (!victims.length) S.notes.push('처리할 때 이 카드가 이미 필드에 없어 그 처리는 할 수 없습니다.');
+          // 「이 카드를 패로 되돌린다」「묘지의 이 카드를 패에 넣는다」: 자기 자신 (발동한 위치에 그대로 있어야 함)
+          const own = ownItem(board, l), home = own ? zoneG(own.costed ? own.loc : (own.origin || 'field')) : null;
+          victims = own && zoneG(own.loc) === home && own.loc !== LOC_AFTER[act.type] ? [own.id] : [];
+          if (!victims.length) S.notes.push(own && zoneG(own.loc) !== home ? `처리할 때 이 카드가 이미 ${LOC_KO2[own.loc]}(으)로 이동해 그 처리는 할 수 없습니다.` : '처리할 때 이 카드가 발동한 위치에 없어 그 처리는 할 수 없습니다.');
         } else if (act && spec && spec.pick) {
           // 처리 시점의 필드에서 조건에 맞는 카드를 고른다 (대상을 지정하지 않음)
           const cands = [...board.values()].filter(b => candMatch(spec, b, l));
@@ -2293,19 +2465,32 @@
             }
           }
           const gone = victims.filter(id => !prot.includes(id));
-          gone.forEach(id => { const b = board.get(id); b.loc = LOC_AFTER[act.type]; events.push({ id, b, type: act.type, pos, i, then: act.then }); });
-          const DONE_KO = { destroy: '파괴되어 묘지로 보내집니다', banish: '제외됩니다', hand: '패로 되돌아갑니다', deck: act.extra ? '엑스트라 덱으로 되돌아갑니다' : '덱으로 되돌아갑니다', gy: '묘지로 보내집니다' };
+          gone.forEach(id => {
+            const b = board.get(id);
+            if (act.type === 'control') { if (b.ctrl === l.ctrl) return; b.ctrl = l.ctrl; }
+            else b.loc = LOC_AFTER[act.type];
+            events.push({ id, b, type: act.type, pos, i, then: act.then, fromField: true });
+          });
+          const DONE_KO = { control: `${b2side(l.ctrl)} 컨트롤이 됩니다`, facedown: '뒷면 수비 표시가 됩니다', search: '패에 넣어집니다', discard: '버려집니다', destroy: '파괴되어 묘지로 보내집니다', banish: '제외됩니다', hand: '패로 되돌아갑니다', deck: act.extra ? '엑스트라 덱으로 되돌아갑니다' : '덱으로 되돌아갑니다', gy: '묘지로 보내집니다' };
           if (gone.length) S.notes.push(`${gone.map(id => '「' + nameOf(board.get(id).m) + '」').join('·')}: ${DONE_KO[act.type]}.`);
-        } else if (act && spec && !tg.length && !spec.self && !act.self && !spec.pick && act.ref !== 'summon') S.notes.push(`${spec.targeting ? '대상' : '처리할 카드'}를 지정하면 카드 이동과 그 뒤의 유발 효과까지 계산합니다.`);
+        } else if (act && !act.from && spec && !tg.length && !spec.self && !act.self && !spec.pick && act.ref !== 'summon') S.notes.push(`${spec.targeting ? '대상' : '처리할 카드'}를 지정하면 카드 이동과 그 뒤의 유발 효과까지 계산합니다.`);
+        if (!act && !summonSpec(e) && !negGuess(immediatePart(e.text))) {
+          const sum = resolveSummary(e.text);
+          if (sum.length) S.notes.push(`처리: ${sum.join(' · ')}. (LP·공격력·카운터 같은 수치는 계산하지 않습니다. 카드 이동이 없는 처리라 다른 카드의 유발 효과에는 영향이 없습니다.)`);
+        }
         // 효과에 의한 특수 소환
         const sm = summonSpec(e);
         if (sm) {
           const newCtrl = sm.opp ? (l.ctrl === 'me' ? 'opp' : 'me') : l.ctrl;
           const summoned = [];
           if (sm.mode === 'self') {
-            let b = board.get('L' + l.uid);
-            if (!b) { b = { id: 'S' + l.uid, m: l.m, kid: l.kid, ctrl: l.ctrl, loc: 'hand' }; board.set(b.id, b); }
-            if (!onField(b)) { b.loc = 'field'; b.ctrl = newCtrl; summoned.push(b); }
+            let b = ownItem(board, l);
+            if (!b) { b = { id: 'S' + l.uid, m: l.m, kid: l.kid, ctrl: l.ctrl, loc: 'hand', origin: 'hand' }; board.set(b.id, b); }
+            // 발동한 위치(패·묘지·제외)에 그대로 있을 때만 특수 소환 (코스트로 보낸 경우는 그 위치에서)
+            const home = b.costed ? b.loc : (b.origin || b.loc);
+            if (onField(b)) { /* 이미 필드 */ }
+            else if (b.loc !== home && !String(b.id).startsWith('S')) S.notes.push(`처리할 때 이 카드가 이미 ${LOC_KO2[b.loc]}(으)로 이동해 특수 소환할 수 없습니다.`);
+            else { b.loc = 'field'; b.ctrl = newCtrl; summoned.push(b); }
           } else if (sm.mode === 'target') {
             tg.forEach(id => { const b = board.get(id); if (b && !onField(b) && b.loc !== 'hand') { b.loc = 'field'; b.ctrl = newCtrl; summoned.push(b); } });
             if (!summoned.length) S.notes.push('대상 몬스터가 남아 있지 않아 특수 소환하지 않습니다.');
@@ -2322,9 +2507,24 @@
             if (!summoned.length) S.notes.push('특수 소환하는 몬스터를 체인 카드에 넣으면, 그 몬스터의 「특수 소환했을 경우」 효과와 다른 카드의 반응까지 계산합니다.');
           }
           summoned.forEach(b => events.push({ id: b.id, b, type: 'summon', pos, i, then: sm.then || (act && act.then), as: sm.as }));
-          if (summoned.length) S.notes.push(`${summoned.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${b2side(newCtrl)} 필드에 ${sm.as ? sm.as + ' 소환으로 취급하여 ' : ''}특수 소환됩니다${sm.optional ? ' (임의)' : ''}.${sm.as ? ` ${sm.as} 소환 취급이라 「${sm.as} 소환했을 경우」 효과는 유발되지만, 효과 처리 중의 특수 소환이므로 「신의 경고」 등 소환을 무효로 하는 효과로는 무효로 할 수 없습니다 (공식 Q&A #12750).` : ''}`);
+          if (summoned.length && sm.perform) S.notes.push(`${summoned.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${b2side(newCtrl)} 필드에 ${sm.perform} 소환됩니다${sm.optional ? ' (임의)' : ''}. 효과로 하는 ${sm.perform} 소환은 이 효과가 체인 1이면 「신의 경고」 등으로 그 소환을 무효로 할 수 있고, 체인 2 이후면 할 수 없습니다 (공식 Q&A #24054). 소재로 쓴 몬스터는 체인 카드에 직접 넣지 않으면 계산하지 않습니다.`);
+          else if (summoned.length) S.notes.push(`${summoned.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${b2side(newCtrl)} 필드에 ${sm.as ? sm.as + ' 소환으로 취급하여 ' : ''}특수 소환됩니다${sm.optional ? ' (임의)' : ''}.${sm.as ? ` ${sm.as} 소환 취급이라 「${sm.as} 소환했을 경우」 효과는 유발되지만, 효과 처리 중의 특수 소환이므로 「신의 경고」 등 소환을 무효로 하는 효과로는 무효로 할 수 없습니다 (공식 Q&A #12750).` : ''}`);
         }
       }
+    }
+    // 체인 0: 소환이 무효가 되지 않았다면 체인 처리 뒤 소환 성공 / 소환 성공시·전투 파괴시는 그 시점에 유발
+    const E0 = CH.ev;
+    if (E0.m && E0.type === 'attack') {
+      const b = { id: 'EV', m: E0.m, kid: E0.kid, ctrl: E0.ctrl, loc: 'field' };
+      board.set('EV', b);
+      events.push({ id: 'EV', b, type: 'attackDecl', pos: -1, i: -1, ev0: true, pre: true, fromField: true });
+    }
+    if (E0.m && ((E0.type === 'summon' && ev.negBy < 0) || E0.type === 'summoned' || E0.type === 'battle')) {
+      const role = battleRole(E0.sub);
+      const b = { id: 'EV', m: E0.m, kid: E0.kid, ctrl: E0.ctrl, loc: E0.type === 'battle' && role === 'destroyed' ? 'gy' : 'field' };
+      board.set('EV', b);
+      const as0 = E0.sub === 'special' ? (classify(E0.m).label.match(/융합|싱크로|엑시즈|링크/) || [])[0] : null;
+      events.push({ id: 'EV', b, type: E0.type === 'battle' ? { destroyed: 'battle', destroyer: 'battleWin', damage: 'battleDmg' }[role] : 'summon', sub: E0.type === 'battle' ? null : E0.sub, as: E0.type === 'battle' ? null : as0, pos: E0.type === 'summon' ? pos : -1, i: -1, ev0: true, pre: E0.type !== 'summon', fromField: true });
     }
     st.ev = ev; st.board = board; st.events = events; st.total = pos;
     return st;
@@ -2332,13 +2532,39 @@
 
   const b2side = (c) => c === 'me' ? '나의' : '상대의';
   // ---------- 처리 후 유발 효과 · 타이밍 놓침 ----------
-  const EVT_RE = { discard: /버려졌을|버려진 경우/, destroy: /파괴되었을|파괴된 경우|파괴되어|파괴됐을/, gy: /묘지로 보내졌을|묘지에 보내졌을/, banish: /제외되었을|제외된 경우/, hand: /패로 되돌아갔을|패로 돌아갔을/, deck: /덱으로 되돌아갔을/, leave: /필드에서 벗어났을|필드를 벗어났을/ };
+  const EVT_RE = { search: /패에 넣어졌을|패에 더해졌을|패에 들어갔을|패에 넣었을|패에 넣은 경우/, release: /릴리스되었을|릴리스된 경우|릴리스했을/, control: /컨트롤이 (?:바뀌었을|변경되었을|옮겨졌을)/, discard: /버려졌을|버려진 경우/, destroy: /파괴되었을|파괴된 경우|파괴되어|파괴됐을/, gy: /묘지로 보내졌을|묘지에 보내졌을/, banish: /제외되었을|제외된 경우/, hand: /패로 되돌아갔을|패로 돌아갔을/, deck: /덱으로 되돌아갔을/, leave: /필드에서 벗어났을|필드를 벗어났을/ };
+  // 예전 텍스트 표기를 지금 표기로 (「필드 위의」「전투에 의해서」「제물」「스텐바이」「게임에서 제외」)
+  const normOld = (t) => String(t || '').replace(/필드 위/g, '필드').replace(/전투에 의해서?/g, '전투로').replace(/효과에 의해서?/g, '효과로').replace(/제물로 바치/g, '릴리스하').replace(/제물/g, '릴리스').replace(/스텐바이/g, '스탠바이').replace(/게임에서 제외/g, '제외').replace(/라이프 포인트/g, 'LP').replace(/엔드 페이즈시/g, '엔드 페이즈에').replace(/스탠바이 페이즈시/g, '스탠바이 페이즈에');
   function evMatches(cond, type, evn) {
-    if (EVT_RE.leave.test(cond)) return true;
+    cond = normOld(cond);
+    // 출발 위치를 지정한 조건 (「덱에서 묘지로 보내졌을」「필드에서 묘지로」「패에서 버려졌을」)
+    if (evn && type !== 'summon') {
+      const want = /엑스트라 덱에서/.test(cond) ? 'extra' : (/덱에서/.test(cond) ? 'deck' : (/패에서/.test(cond) ? 'hand' : (/필드에서|필드의|몬스터 존에서|앞면 표시의/.test(cond) ? 'field' : null)));
+      if (want) {
+        const from = evn.from || (evn.fromField === false ? (evn.cost ? 'hand' : null) : 'field');
+        if (from && from !== want) return false;
+      }
+    }
+    if (type === 'search') return EVT_RE.search.test(cond);
+    if (type === 'control') return EVT_RE.control.test(cond);
+    if (type === 'facedown') return /뒷면 표시가 되었을|뒷면 수비 표시가 되었을/.test(cond);
+    if (type === 'release') return EVT_RE.release.test(cond) || EVT_RE.gy.test(cond);
+    if (type === 'battleWin') return /전투로 (?:상대 )?(?:(?:[^ ]+ )?몬스터를 )?파괴(?:했을|한 (?:경우|때|데미지)|하고|하여|해)/.test(cond);
+    if (type === 'battleDmg') return /전투 데미지를 (?:주었을|준 경우|준 때|줬을|줄 때)/.test(cond);
+    if (type === 'attackDecl') return /공격 선언(?:시|했을|한 때)|공격 대상으로 선택되었을/.test(cond);
+    if (type === 'battle') return /전투로 파괴되었을|전투로 파괴되어|전투로 파괴된 경우|전투로 파괴됐을/.test(cond) || (EVT_RE.gy.test(cond) && !/효과로/.test(cond)) || (EVT_RE.destroy.test(cond) && !/효과로|효과에 의해/.test(cond));
+    if (EVT_RE.leave.test(cond)) return !['search', 'control', 'facedown'].includes(type);
     const battleOnly = /전투로 파괴/.test(cond) && !/효과/.test(cond);
     if (type === 'destroy') return (EVT_RE.destroy.test(cond) && !battleOnly) || EVT_RE.gy.test(cond);
     if (type === 'gy') return EVT_RE.gy.test(cond);
     if (type === 'discard') return EVT_RE.discard.test(cond) || EVT_RE.gy.test(cond);
+    if (type === 'summon' && evn && (evn.sub === 'normal' || evn.sub === 'flip')) {
+      // 일반 소환 · 반전 소환: 「소환에 성공했을 / 소환했을」 (특수·반전·융합 등 방법 지정 제외), 「반전 소환」「리버스」
+      if (evn.sub === 'flip' && /반전 소환|리버스/.test(cond)) return true;
+      if (evn.sub === 'normal' && /일반 소환|어드밴스 소환/.test(cond)) return true;
+      const rest = cond.replace(/(특수|반전|융합|싱크로|엑시즈|링크|펜듈럼|의식|일반|어드밴스) 소환/g, '§');
+      return /(?:^|[^가-힣§])소환\s*(?:(?:\/|·|또는|및)\s*§\s*)?(?:에 성공했을|에 성공한|했을|되었을|된 경우|된 때)/.test(rest) || /소환\s*(?:\/|·|또는)\s*§\s*(?:에 성공했을|했을|되었을|된 경우)/.test(rest);
+    }
     if (type === 'summon') {
       // 효과에 의한 특수 소환: 「특수 소환」이 들어간 조건만 (「소환에 성공했을」만 있으면 일반 소환)
       if (evn && evn.as && new RegExp(evn.as + ' 소환(?:했을|되었을|에 성공했을|된 경우)').test(cond)) return true;
@@ -2356,33 +2582,85 @@
       if (seen.has(key)) return; seen.add(key);
       const body = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '');
       const when = /^[^.。]*?때/.test(body) && !/^[^.。]*?경우/.test(body);
-      const notLast = evn.pos !== last || evn.then;
+      const notLast = evn.pre ? false : (evn.pos !== last || evn.then);
       const missed = when && e.opt && notLast;
       out.push({
         key, b, m: b.m, kid: b.kid, ctrl: b.ctrl, eff: k, e, opt: e.opt, when, missed, generic, evn,
+        pre: !!evn.pre,
         reason: missed ? (evn.cost ? `「${nameOf(evn.b.m)}」은(는) 체인 ${evn.i + 1}을(를) 발동할 때 코스트로 ${{ discard: '버려졌고', gy: '묘지로 보내졌고', banish: '제외되었고' }[evn.type] || '이동했고'}, 그 뒤 체인 처리가 이어졌습니다`
+          : evn.type === 'activate' ? `체인 ${evn.i + 1} 「${nameOf(evn.b.m)}」의 발동 뒤에 체인 처리가 이어졌습니다`
           : evn.pos !== last ? `「${nameOf(evn.b.m)}」의 이동은 체인 ${evn.i + 1} 처리 중에 일어났고, 그 뒤에 다른 체인이 처리되었습니다` : '같은 효과 처리 안에서 「그 후」 이어지는 처리가 있었습니다') : ''
       });
     };
     for (const evn of sim.events) {
       analyze(evn.b.m).chain.forEach((e, k) => {
+        if (evn.type === 'summon' && evn.sub === 'flip' && /^(?:[\u2460-\u2473]\s*[:：]\s*)?리버스\s*[:：]/.test(e.text)) { push(evn.b, k, e, evn, false); return; }
         if (e.kind !== 'trigger') return;
-        const cm = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([^.。]*?)(?:경우|때)/);
-        if (cm && /이 카드가|이 카드를/.test(cm[1]) && evMatches(cm[1], evn.type, evn) && !(/필드에서/.test(cm[1]) && evn.cost && !evn.fromField)) push(evn.b, k, e, evn, false);
+        const cm = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(evn.type === 'attackDecl' ? /^([^.。]*?)(?:경우|때|공격 선언시(?:에)?(?=[,，\s]))/ : /^([^.。]*?)(?:경우|때)/);
+        if (cm && (/이 카드가|이 카드를/.test(cm[1]) || (evn.type === 'attackDecl' && /이 카드의 (?:직접 )?공격 선언/.test(cm[0]))) && evMatches(cm[0], evn.type, evn) && !(/필드에서/.test(cm[1]) && evn.cost && !evn.fromField)) push(evn.b, k, e, evn, false);
       });
     }
     // 다른 카드의 「자신 / 상대 필드의 카드가 ~되었을 경우」 같은 유발 효과
     for (const b of sim.board.values()) {
       analyze(b.m).chain.forEach((e, k) => {
         if (e.kind !== 'trigger') return;
-        const cm = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([^.。]*?)(?:경우|때)/);
-        if (!cm || /이 카드가|이 카드를/.test(cm[1])) return;
-        const evs = sim.events.filter(evn => evn.b.id !== b.id && evMatches(cm[1], evn.type)
-          && (evn.type !== 'summon' || b.loc === 'field')
+        const cm = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([^.。]*?)(?:경우|때|공격 선언시(?:에)?(?=[,，\s]))/);
+        if (!cm || /이 카드가|이 카드를|이 카드의 (?:직접 )?공격/.test(cm[1])) return;
+        const z = actZone(b.m, e);
+        if (z === 'field' ? b.loc !== 'field' : (z !== 'unknown' && b.loc !== z)) return;
+        const evs = sim.events.filter(evn => evn.b.id !== b.id && evMatches(cm[0], evn.type, evn)
           && (!/자신 필드|자신의|자신이/.test(cm[1]) || evn.b.ctrl === b.ctrl) && (!/상대 필드|상대의|상대가/.test(cm[1]) || evn.b.ctrl !== b.ctrl)
           && (!/몬스터/.test(cm[1]) || classify(evn.b.m).kind === 'monster'));
         if (evs.length) push(b, k, e, evs.reduce((a, x) => (x.pos > a.pos ? x : a)), true);
       });
+    }
+    // 체인을 만들 때 발동한 카드·효과로 유발되는 효과: 체인 처리가 끝난 뒤 발동
+    if (CH.links.length) {
+      CH.links.forEach((l, i) => {
+        if (!l.m || (sim[i] && sim[i].s === 'invalid')) return;
+        const le = linkEff(l); if (!le) return;
+        const lcls = classify(l.m), prop = l.m.base.property || '';
+        for (const b of sim.board.values()) {
+          analyze(b.m).chain.forEach((e, k) => {
+            if (e.kind !== 'trigger') return;
+            const body = normOld(e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, ''));
+            const cm = body.match(/^([^.。]*?)(?:발동했을|발동되었을)\s*(?:경우|때)/); if (!cm) return;
+            const c = cm[1], self = b.link === l || b.id === 'L' + l.uid;
+            if (/이 카드의/.test(c) && !/이 카드 이외/.test(c)) { if (!self) return; const n = (c.match(/이 카드의 ([\u2460-\u2473])/) || [])[1]; if (n && effNum(le) !== n) return; }
+            else if (self) return;
+            if (/자신이|자신의/.test(c) && !/상대/.test(c) && l.ctrl !== b.ctrl) return;
+            if (/상대가|상대의/.test(c) && !/자신/.test(c) && l.ctrl === b.ctrl) return;
+            if (/카운터 함정/.test(c) && !(lcls.kind === 'trap' && prop === 'counter')) return;
+            if (/필드 마법/.test(c) && !(lcls.kind === 'spell' && prop === 'field')) return;
+            const wantM = /몬스터(?:의)? 효과/.test(c), wantS = /마법/.test(c), wantT = /함정/.test(c);
+            if ((wantM || wantS || wantT) && !((wantM && lcls.kind === 'monster') || (wantS && lcls.kind === 'spell') || (wantT && lcls.kind === 'trap'))) return;
+            if (/카드가 발동|카드를 발동/.test(c) && !/효과/.test(c) && !le.isAct) return;   // 「카드의 발동」만
+            const nm = (c.match(/"([^"]+)"/) || [])[1];
+            if (nm && !(nameOf(l.m).includes(nm) || (l.m.name.ja || '').includes(nm))) return;
+            const z = actZone(b.m, e);
+            if (z === 'field' ? b.loc !== 'field' : (z !== 'unknown' && b.loc !== z)) return;
+            push(b, k, e, { id: 'L' + l.uid, b: { m: l.m, id: 'L' + l.uid, ctrl: l.ctrl }, type: 'activate', pos: 0, i, then: false }, true);
+          });
+        }
+      });
+    }
+    // 체인 0 · 페이즈 진입: 「자신 스탠바이 페이즈에 발동한다」「엔드 페이즈에 발동할 수 있다」 같은 유발 효과
+    if (CH.ev.type === 'phase' && !CH.links.length) {
+      const PW = { draw: '드로우', standby: '스탠바이', main1: '메인', main2: '메인', battle: '배틀', end: '엔드' }[CH.phase || 'main1'];
+      const re = new RegExp('(자신\\s*/\\s*상대|자신|상대|서로)?(?:의)?\\s*(?:[^.。,，]*?턴의\\s*)?' + PW + ' 페이즈(?:에|시|마다)');
+      for (const b of sim.board.values()) {
+        analyze(b.m).chain.forEach((e, k) => {
+          if (e.kind !== 'trigger') return;
+          const head = normOld((e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').split(/발동할 수 있다|발동한다|[.。]/)[0]) || '');
+          const mm = head.match(re); if (!mm) return;
+          const who = (mm[1] || '').replace(/\s/g, '');
+          if (who === '자신' && b.ctrl !== CH.turn) return;
+          if (who === '상대' && b.ctrl === CH.turn) return;
+          const z = actZone(b.m, e);
+          if (z === 'field' ? b.loc !== 'field' : (z !== 'unknown' && b.loc !== z)) return;
+          push(b, k, e, { id: b.id, b, type: 'phase', pos: -1, i: -1, pre: true }, /경우|턴의|때/.test(head.replace(mm[0], '')));
+        });
+      }
     }
     // 「몬스터가 특수 소환되었을 때 발동할 수 있다」 마법·함정 (격류장 등): 유발 효과가 아니라 대응으로 발동
     const sumEvs = sim.events.filter(evn => evn.type === 'summon');
@@ -2431,7 +2709,7 @@
   function nextHtml(sim) {
     const post = postTriggers(sim);
     CH._post = post;
-    if (!CH.links.length) return '';
+    if (!CH.links.length && !post.length) return '';
     const rows = post.map(p => {
       const sel = CH.postSel[p.key] ?? true;
       const chip = p.missed
@@ -2439,13 +2717,13 @@
         : '<span class="text-[10px] font-bold rounded px-1.5 py-0.5 bg-emerald-600 text-white">발동 가능</span>';
       const box = (p.missed || p.respond) ? '' : `<label class="ml-auto flex items-center gap-1 text-[11px] text-slate-300 flex-none"><input type="checkbox" data-act="postSel" data-key="${esc(p.key)}" class="accent-amber-500" ${p.opt ? '' : 'disabled'} ${!p.opt || sel ? 'checked' : ''}>${p.opt ? '발동' : '강제'}</label>`;
       return `<li class="rounded-xl bg-slate-800/60 border border-slate-700/60 p-2.5">
-        <div class="flex items-center gap-1.5 flex-wrap"><span class="text-sm font-bold break-keep">${esc(nameOf(p.m))}</span><span class="text-[10px] ${p.ctrl === 'me' ? 'text-sky-300' : 'text-rose-300'}">${p.ctrl === 'me' ? '나' : '상대'}</span><span class="text-[11px] text-slate-400">${p.respond ? '카드의 발동 · 소환에 대응 (스펠 스피드 2)' : esc(p.e.label) + ' · 유발 ' + (p.opt ? '(임의)' : '(강제)')} · 「${p.when ? '때' : '경우'}」</span>${chip}${box}</div>
-        <p class="text-[11px] mt-1 break-keep ${p.missed ? 'text-rose-300' : 'text-slate-400'}">${p.missed ? esc(p.reason) + '. 「~했을 때 ~할 수 있다」 효과라서 타이밍을 놓쳤습니다.' : (p.when && p.opt ? '그 일이 체인의 마지막 처리였으므로 타이밍을 놓치지 않습니다.' : (p.opt ? '「경우」 효과라서 타이밍을 놓치지 않습니다.' : '강제 효과는 타이밍을 놓치지 않습니다.'))}${p.generic ? ' (다른 카드의 이동·소환으로 유발되는 효과입니다. 조건을 확인하세요.)' : ''}${p.respond && !p.missed ? ' 유발 효과가 아니므로 동시 유발 순서에는 들어가지 않고, 체인 처리 후 소환 성공시의 타이밍에 발동할 수 있습니다.' : ''}</p>
+        <div class="flex items-center gap-1.5 flex-wrap"><span class="text-sm font-bold break-keep">${esc(nameOf(p.m))}</span><span class="text-[10px] ${p.ctrl === 'me' ? 'text-sky-300' : 'text-rose-300'}">${p.ctrl === 'me' ? '나' : '상대'}</span><span class="text-[11px] text-slate-400">${p.respond ? '카드의 발동 · 소환에 대응 (스펠 스피드 2)' : esc(p.e.label) + ' · 유발 ' + (p.opt ? '(임의)' : '(강제)')} · 「${p.when ? '때' : (/경우/.test(p.e.text.split(/[.。]/)[0]) ? '경우' : '시')}」</span>${chip}${box}</div>
+        <p class="text-[11px] mt-1 break-keep ${p.missed ? 'text-rose-300' : 'text-slate-400'}">${p.missed ? esc(p.reason) + '. 「~했을 때 ~할 수 있다」 효과라서 타이밍을 놓쳤습니다.' : (p.pre ? '이 상황에서 바로 유발되었으므로 타이밍을 놓치지 않습니다.' : p.when && p.opt ? '그 일이 체인의 마지막 처리였으므로 타이밍을 놓치지 않습니다.' : (p.opt ? '「경우」 효과라서 타이밍을 놓치지 않습니다.' : '강제 효과는 타이밍을 놓치지 않습니다.'))}${p.generic ? ({ phase: ' (페이즈 진입으로 유발되는 효과입니다. 그 밖의 발동 조건을 확인하세요.)', attackDecl: ' (공격 선언으로 유발되는 효과입니다. 조건을 확인하세요.)', activate: ' (카드·효과의 발동으로 유발되는 효과입니다. 조건을 확인하세요.)' }[p.evn && p.evn.type] || ' (다른 카드의 이동·소환으로 유발되는 효과입니다. 조건을 확인하세요.)') : ''}${p.pre && CH.links.length ? ' 이 효과는 체인 0의 상황에서 유발되었으므로, 이 체인의 체인 1부터 동시 유발로 쌓아야 합니다.' : ''}${p.respond && !p.missed ? ' 유발 효과가 아니므로 동시 유발 순서에는 들어가지 않고, 체인 처리 후 소환 성공시의 타이밍에 발동할 수 있습니다.' : ''}</p>
       </li>`;
     }).join('');
     return `<div class="rounded-2xl border border-emerald-800/50 bg-emerald-950/10 p-3 mt-3">
-      <h3 class="text-sm font-extrabold flex items-center gap-2"><i class="fa-solid fa-bolt text-emerald-300"></i>체인 처리 후 유발되는 효과</h3>
-      <p class="text-[11px] text-slate-400 mt-1 break-keep">처리 중 이동하거나 특수 소환된 카드로 유발되는 효과입니다. 이 효과들은 체인이 모두 끝난 뒤 새 체인으로 발동합니다. 「~했을 때 ~할 수 있다」 효과는 그 일이 마지막 처리가 아니었다면 타이밍을 놓칩니다.</p>
+      <h3 class="text-sm font-extrabold flex items-center gap-2"><i class="fa-solid fa-bolt text-emerald-300"></i>${CH.links.length ? '체인 처리 후 유발되는 효과' : '이 상황에서 유발되는 효과'}</h3>
+      <p class="text-[11px] text-slate-400 mt-1 break-keep">${CH.links.length ? '처리 중 이동하거나 특수 소환된 카드로 유발되는 효과입니다. 이 효과들은 체인이 모두 끝난 뒤 새 체인으로 발동합니다. 「~했을 때 ~할 수 있다」 효과는 그 일이 마지막 처리가 아니었다면 타이밍을 놓칩니다.' : '위 「체인 0 · 상황」으로 유발된 효과입니다. 아래 「동시 유발 정리」 순서대로 체인 1부터 쌓습니다.'}</p>
       ${rows ? `<ul class="flex flex-col gap-1.5 mt-2">${rows}</ul>` : '<p class="text-xs text-slate-500 mt-2">유발되는 효과가 없습니다. 파괴·제외 같은 효과는 체인 카드에서 대상이나 영향 받는 카드를 고르면 계산합니다.</p>'}
     </div>`;
   }
@@ -2540,6 +2818,7 @@
     if (!e) return '';
     const spec = targetSpec(e), act = linkAction(e);
     if (!spec.targeting && !act) return '';
+    if (act && act.from && !spec.targeting) return '';
     const head = '<div class="mt-2 text-[11px] text-slate-400"><i class="fa-solid fa-crosshairs mr-1"></i>';
     const selfLine = act && act.self ? `${head}처리: 이 카드를 ${act.type === 'deck' && act.extra ? '엑스트라 덱으로 되돌림' : ACT_KO[act.type]} (자동)</div>` : '';
     if (act && act.ref === 'summon' && !spec.targeting) return `${head}처리: 소환을 무효로 하고 소환하려던 그 몬스터를 ${ACT_KO[act.type]} (자동)</div>`;
@@ -2557,15 +2836,28 @@
   function costPicker(l, e) {
     const c = costSpec(e); if (!c) return '';
     const head = '<i class="fa-solid fa-coins mr-1"></i>';
+    if (c.type === 'lp') return `<div class="mt-2 text-[11px] text-slate-400">${head}코스트: ${esc(c.text || 'LP')} 지불 (발동할 때 · 효과가 무효가 되어도 돌아오지 않음)</div>`;
+    if (c.type === 'reveal') return `<div class="mt-2 text-[11px] text-slate-400">${head}코스트: ${c.self ? '이 카드를' : '패의 카드를'} 공개 (발동할 때 · 카드는 이동하지 않음)</div>`;
+    if (c.type === 'detach') return `<div class="mt-2 text-[11px] text-slate-400">${head}코스트: 엑시즈 소재 ${c.n}개를 제거 (발동할 때 · 제거한 소재는 묘지로 보내짐)</div>`;
     if (c.self) return `<div class="mt-2 text-[11px] text-slate-400">${head}코스트: 이 카드를 ${COST_KO[c.type]} (발동할 때)</div>`;
     const zoneKo = { field: '자신 필드', '패': '패', '덱': '덱', '엑스트라 덱': '엑스트라 덱', '묘지': '묘지' }[c.zone] || c.zone;
     let chips = '';
-    if (c.zone === 'field') chips = boardItems().filter(b => onField(b) && b.ctrl === l.ctrl && b.id !== 'L' + l.uid)
+    const czone = { field: 'field', '묘지': 'gy', '패': 'hand', '제외': 'banished' }[c.zone];
+    if (czone) chips = boardItems().filter(b => zoneG(b.loc) === czone && b.ctrl === l.ctrl && b.id !== 'L' + l.uid && b.link !== l)
       .map(b => `<button data-act="costB" data-uid="${l.uid}" data-id="${b.id}" class="rounded-full px-2 py-1 text-[11px] font-bold border ${(l.costB || []).includes(b.id) ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-700 text-slate-300 bg-slate-800/80'}">${esc(nameOf(b.m))}</button>`).join('');
     chips += (l.costK || []).map((kid, n) => `<button data-act="costDel" data-uid="${l.uid}" data-n="${n}" class="rounded-full px-2 py-1 text-[11px] font-bold border bg-amber-500 border-amber-500 text-ink-900">${esc(cardName(kid))} <i class="fa-solid fa-xmark ml-0.5"></i></button>`).join('');
     const input = c.zone === 'field' ? '' : `<input data-act="costAdd" data-uid="${l.uid}" type="search" autocomplete="off" spellcheck="false" placeholder="코스트로 보낸 카드 (선택 · 이름/초성)" class="w-full ${SEL} py-1.5 mt-1"><div id="costRes-${l.uid}" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div>`;
     return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}코스트: ${zoneKo}의 카드 ${c.n}장을 ${COST_KO[c.type]} (발동할 때) · 보낸 카드를 넣으면 그 카드의 유발 효과와 타이밍 놓침을 계산합니다</div>
       ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : ''}${input}</div>`;
+  }
+
+  function movePicker(l, e) {
+    const act = e && linkAction(e); if (!act || !act.from) return '';
+    const n = ((act.obj || '').match(/(\d+)장/) || [])[1] || 1;
+    const chips = (l.movK || []).map((kid, k) => `<button data-act="movDel" data-uid="${l.uid}" data-n="${k}" class="rounded-full px-2 py-1 text-[11px] font-bold border bg-sky-500 border-sky-500 text-ink-900">${esc(cardName(kid))} <i class="fa-solid fa-xmark ml-0.5"></i></button>`).join('');
+    return `<div class="mt-2"><div class="text-[11px] text-slate-400"><i class="fa-solid fa-right-left mr-1"></i>처리: ${FROM_KO[act.from]}에서 카드 ${n}장을 ${ACT_KO[act.type]} · 그 카드를 넣으면 그 카드의 유발 효과와 타이밍 놓침을 계산합니다</div>
+      ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : ''}
+      <input data-act="movAdd" data-uid="${l.uid}" data-n="${n}" type="search" autocomplete="off" spellcheck="false" placeholder="${FROM_KO[act.from]}에서 ${ACT_KO[act.type]}한 카드 (선택 · 이름/초성)" class="w-full ${SEL} py-1.5 mt-1"><div id="movRes-${l.uid}" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div></div>`;
   }
 
   function summonPicker(l, e) {
@@ -2574,8 +2866,8 @@
     if (sm.mode === 'self') return `<div class="mt-2 text-[11px] text-slate-400">${head}처리: 이 카드를 특수 소환 (자동)</div>`;
     if (sm.mode === 'target') return `<div class="mt-2 text-[11px] text-slate-400">${head}처리: 대상으로 한 몬스터를 특수 소환 (위에서 대상을 고르세요)</div>`;
     const chips = (l.sumK || []).map((kid, n) => `<button data-act="sumDel" data-uid="${l.uid}" data-n="${n}" class="rounded-full px-2 py-1 text-[11px] font-bold border bg-emerald-500 border-emerald-500 text-ink-900">${esc(cardName(kid))} <i class="fa-solid fa-xmark ml-0.5"></i></button>`).join('');
-    const cond = [sm.from && sm.from + '에서', sm.sameLv && '대상과 같은 레벨의', sm.race && sm.race + '족', sm.kind ? sm.kind + ' 몬스터' : '몬스터', sm.n + '장을', sm.as && sm.as + ' 소환으로 취급하여'].filter(Boolean).join(' ');
-    return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}처리: ${esc(cond)} 특수 소환${sm.optional ? ' (임의)' : ''} · 소환한 몬스터를 넣으면 그 몬스터의 유발 효과와 다른 카드의 반응을 계산합니다</div>
+    const cond = [sm.from && sm.from + '에서', sm.sameLv && '대상과 같은 레벨의', sm.race && sm.race + '족', sm.kind ? sm.kind + ' 몬스터' : '몬스터', sm.n + '장을', !sm.perform && sm.as && sm.as + ' 소환으로 취급하여'].filter(Boolean).join(' ');
+    return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}처리: ${esc(cond)} ${sm.perform ? sm.perform + ' 소환' : '특수 소환'}${sm.optional ? ' (임의)' : ''} · 소환한 몬스터를 넣으면 그 몬스터의 유발 효과와 다른 카드의 반응을 계산합니다</div>
       ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : ''}
       <input data-act="sumAdd" data-uid="${l.uid}" type="search" autocomplete="off" spellcheck="false" placeholder="특수 소환한 몬스터 (선택 · 이름/초성)" class="w-full ${SEL} py-1.5 mt-1"><div id="sumRes-${l.uid}" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div></div>`;
   }
@@ -2625,12 +2917,14 @@
           <button data-act="ctrl" data-uid="${l.uid}" data-v="opp" class="px-2 py-1 ${l.ctrl === 'opp' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}">상대</button>
         </div>
         <span class="text-[10px] text-slate-500 truncate min-w-0">${esc(cls.label)}</span>
+        ${e && !e.isAct ? `<select data-act="zone" data-uid="${l.uid}" class="${SEL} flex-none !py-1" title="이 효과를 발동한 위치">${[['', '자동 · ' + ZONE_KO[actZone(l.m, e)]], ['field', '필드에서'], ['hand', '패에서'], ['gy', '묘지에서'], ['banished', '제외 상태에서']].map(([v, n]) => `<option value="${v}" ${(l.zone || '') === v ? 'selected' : ''}>${n}</option>`).join('')}</select>` : ''}
         ${tools}
       </div>
       <div class="flex items-center gap-1.5 mt-2">${effSel}${ssSel}</div>
       ${negSel}
       ${costPicker(l, e)}
       ${targetPicker(l, e)}
+      ${movePicker(l, e)}
       ${summonPicker(l, e)}
       ${flags ? `<div class="flex flex-wrap gap-1.5 mt-2">${flags}</div>` : ''}
       ${e ? `<details class="mt-2"><summary class="text-[11px] text-slate-400"><i class="fa-solid fa-chevron-down chev text-[9px] mr-1"></i>효과 텍스트 보기</summary><div class="acc-body mt-1.5 rounded-lg bg-slate-800/70 p-2.5 flex flex-col gap-2">${renderBlock(e.text, textLang(l.m))}</div></details>` : ''}
@@ -2754,12 +3048,13 @@
     let body = '';
     if (ev.type === 'none') body = '<p class="text-[11px] text-slate-500 mt-1.5 break-keep">아무것도 처리 중이 아닌 상태에서 체인 1을 발동합니다. 소환·공격 선언처럼 체인 블록을 만들지 않는 행동에 대응한다면 여기서 상황을 고르세요.</p>';
     else {
-      const who = ev.type === 'attack' ? '공격하는 플레이어' : (ev.type === 'phase' ? '' : '소환하는 플레이어');
-      const subSel = (ev.type === 'summon' || ev.type === 'summoned') ? `<select data-act="evSub" class="${SEL} flex-1 min-w-0">${EV_SUB.map(([k, n]) => `<option value="${k}" ${ev.sub === k ? 'selected' : ''}>${n}</option>`).join('')}</select>` : '';
+      const who = ev.type === 'attack' ? '공격하는 플레이어' : (ev.type === 'phase' ? '' : (ev.type === 'battle' ? '그 몬스터의 플레이어' : '소환하는 플레이어'));
+      const subSel = (ev.type === 'summon' || ev.type === 'summoned') ? `<select data-act="evSub" class="${SEL} flex-1 min-w-0">${EV_SUB.map(([k, n]) => `<option value="${k}" ${ev.sub === k ? 'selected' : ''}>${n}</option>`).join('')}</select>`
+        : ev.type === 'battle' ? `<select data-act="evSub" class="${SEL} flex-1 min-w-0">${BATTLE_SUB.map(([k, n]) => `<option value="${k}" ${battleRole(ev.sub) === k ? 'selected' : ''}>${n}</option>`).join('')}</select>` : '';
       const ctrlTg = who ? `<span class="text-[11px] text-slate-400 flex-none">${who}</span><div class="inline-flex rounded-lg overflow-hidden border border-slate-700 text-[11px] font-bold flex-none"><button data-act="evCtrl" data-v="me" class="px-2 py-1 ${ev.ctrl === 'me' ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400'}">나</button><button data-act="evCtrl" data-v="opp" class="px-2 py-1 ${ev.ctrl === 'opp' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}">상대</button></div>` : '';
       const card = ev.type === 'phase' ? '' : (ev.kid
         ? `<div class="flex items-center gap-2 mt-2"><i class="fa-solid fa-dragon text-amber-400 text-xs"></i><button data-act="open" data-kid="${ev.kid}" class="text-sm font-bold truncate flex-1 text-left hover:text-amber-300">${esc(evName())}</button><button data-act="evClear" class="text-slate-500 hover:text-rose-400 text-xs px-1" title="지우기"><i class="fa-solid fa-xmark"></i></button></div>`
-        : `<div class="mt-2"><input id="evAdd" type="search" autocomplete="off" spellcheck="false" placeholder="${ev.type === 'attack' ? '공격하는 몬스터' : '소환하는 몬스터'} (선택 · 이름/초성)" class="w-full ${SEL} py-2"><div id="evAddRes" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div></div>`);
+        : `<div class="mt-2"><input id="evAdd" type="search" autocomplete="off" spellcheck="false" placeholder="${ev.type === 'attack' ? '공격하는 몬스터' : (ev.type === 'battle' ? '그 몬스터' : '소환하는 몬스터')} (선택 · 이름/초성)" class="w-full ${SEL} py-2"><div id="evAddRes" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div></div>`);
       body = `${subSel || ctrlTg ? `<div class="flex items-center gap-1.5 mt-2 flex-wrap">${subSel}${ctrlTg}</div>` : ''}${card}<p class="text-[11px] text-slate-400 mt-2 break-keep">${EV_HELP[ev.type]}</p>`;
     }
     return `<div class="rounded-2xl border border-amber-800/50 bg-amber-950/10 p-3 mb-2">
@@ -2780,7 +3075,7 @@
       const r = vo[k] || { err: [], info: [] };
       const del = `<button data-act="outDel" data-uid="${o.uid}" class="w-7 h-7 rounded-lg text-xs text-slate-400 hover:text-rose-400" title="삭제"><i class="fa-solid fa-xmark"></i></button>`;
       if (!o.m) return `<div class="rounded-xl border border-violet-800/60 bg-violet-950/20 p-2.5 flex items-center gap-2 text-sm text-slate-400">${o.err ? '불러오기 실패' : '<i class="fa-solid fa-circle-notch spin text-amber-400"></i> 불러오는 중'} · ${esc(cardName(o.kid))}<span class="ml-auto">${del}</span></div>`;
-      const locSel = `<select data-act="outLoc" data-uid="${o.uid}" class="${SEL} flex-none">${[['field', '필드 (앞면)'], ['set', '필드 (세트)'], ['gy', '묘지']].map(([v, n]) => `<option value="${v}" ${(o.loc || 'field') === v ? 'selected' : ''}>${n}</option>`).join('')}</select>`;
+      const locSel = `<select data-act="outLoc" data-uid="${o.uid}" class="${SEL} flex-none">${[['field', '필드 (앞면)'], ['set', '필드 (세트)'], ['gy', '묘지'], ['banished', '제외 상태'], ['hand', '패']].map(([v, n]) => `<option value="${v}" ${(o.loc || 'field') === v ? 'selected' : ''}>${n}</option>`).join('')}</select>`;
       const fxs = fxList(o);
       const rows = fxs.map(f => {
         const chip = (key, label) => `<button data-act="fxFlag" data-uid="${o.uid}" data-i="${f.i}" data-k="${key}" class="rounded-full px-2 py-0.5 text-[11px] font-bold border ${f[key] ? 'bg-violet-600 border-violet-500 text-white' : 'border-slate-700 text-slate-400'}">${label}</button>`;
@@ -2849,6 +3144,7 @@
         <button data-act="turn" data-v="me" class="px-2.5 py-1.5 ${CH.turn === 'me' ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400'}">내 턴</button>
         <button data-act="turn" data-v="opp" class="px-2.5 py-1.5 ${CH.turn === 'opp' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}">상대 턴</button>
       </div>
+      <select data-act="phase" class="${SEL} !py-1.5" title="지금 페이즈">${PHASES.map(([k, n]) => `<option value="${k}" ${CH.phase === k ? 'selected' : ''}>${n}</option>`).join('')}</select>
       <button data-act="dmg" class="rounded-lg border px-2.5 py-1.5 text-[11px] font-bold ${CH.dmg ? 'bg-amber-500 text-ink-900 border-amber-500' : 'border-slate-700 text-slate-400 bg-slate-800'}"><i class="fa-solid fa-khanda mr-1"></i>데미지 스텝 중</button>`;
     const vo = validateOut();
     CH._vo = vo;
@@ -2863,8 +3159,8 @@
           <p class="text-xs text-slate-500 mt-1">카드 상세 화면의 「체인에 추가」 버튼으로도 넣을 수 있습니다.</p>
         </div>`;
     $('#chainResolve').innerHTML = L.length ? resolveHtml(v) : '';
-    if (!L.length) { CH._sim = null; CH._post = []; }
-    $('#chainNext').innerHTML = L.length && CH._sim ? nextHtml(CH._sim) : '';
+    if (!L.length) { CH._sim = CH.ev.type === 'phase' || (CH.ev.m && ['summon', 'summoned', 'battle', 'attack'].includes(CH.ev.type)) ? simulate([]) : null; CH._post = CH._sim ? postTriggers(CH._sim) : []; }
+    $('#chainNext').innerHTML = CH._sim ? nextHtml(CH._sim) : '';
     $('#chainSegoc').innerHTML = segocHtml();
     renderChainQa();
   }
@@ -2898,7 +3194,7 @@
       const l = CH.links.find(x => x.uid === Number(t.dataset.uid));
       switch (act) {
         case 'turn': CH.turn = t.dataset.v; break;
-        case 'dmg': CH.dmg = !CH.dmg; break;
+        case 'dmg': CH.dmg = !CH.dmg; if (CH.dmg) CH.phase = 'battle'; break;
         case 'ctrl': if (l) l.ctrl = t.dataset.v; CH.links.forEach(autoNeg); break;
         case 'up': case 'down': {
           const i = CH.links.indexOf(l), j = act === 'up' ? i - 1 : i + 1;
@@ -2964,6 +3260,14 @@
           break;
         }
         case 'sumDel': if (l) l.sumK = (l.sumK || []).filter((x, n) => n !== Number(t.dataset.n)); break;
+        case 'movPick': {
+          if (!l) break;
+          const kid = Number(t.dataset.kid), max = Number(t.dataset.max) || 1;
+          l.movK = [...(l.movK || []), kid].slice(-max);
+          loadCard(kid).then(() => { saveChain(); renderChain(); }).catch(() => {});
+          break;
+        }
+        case 'movDel': if (l) l.movK = (l.movK || []).filter((x, n) => n !== Number(t.dataset.n)); break;
         case 'tg': {
           if (!l) break;
           const id = t.dataset.id, e = linkEff(l), max = e ? targetSpec(e).max : 1;
@@ -3015,6 +3319,10 @@
       if (t.id === 'evAdd') $('#evAddRes').innerHTML = pickList(t.value.trim(), 'evPick');
       if (t.id === 'outAdd') $('#outAddRes').innerHTML = pickList(t.value.trim(), 'outPick');
       if (t.id === 'trigAdd') $('#trigAddRes').innerHTML = pickList(t.value.trim(), 'trigPick');
+      if (t.dataset && t.dataset.act === 'movAdd') {
+        const box = $('#movRes-' + t.dataset.uid);
+        if (box) box.innerHTML = pickList(t.value.trim(), 'movPick').replace(/data-act="movPick"/g, `data-act="movPick" data-uid="${t.dataset.uid}" data-max="${t.dataset.n}"`);
+      }
       if (t.dataset && t.dataset.act === 'sumAdd') {
         const box = $('#sumRes-' + t.dataset.uid);
         if (box) box.innerHTML = pickList(t.value.trim(), 'sumPick').replace(/data-act="sumPick"/g, `data-act="sumPick" data-uid="${t.dataset.uid}"`);
@@ -3034,8 +3342,10 @@
         if (act === 'trigEff') x.eff = Number(t.value); else x.mand = t.value === 'auto' ? null : t.value === '1';
         renderChain(); return;
       }
+      if (act === 'phase') { CH.phase = t.value; if (CH.phase !== 'battle') CH.dmg = false; saveChain(); renderChain(); return; }
       if (act === 'evType' || act === 'evSub') {
         CH.ev[act === 'evType' ? 'type' : 'sub'] = t.value;
+        if (act === 'evType' && (t.value === 'attack' || t.value === 'battle')) CH.phase = 'battle';
         CH.links.forEach(autoNeg);
         saveChain(); renderChain(); return;
       }
@@ -3058,6 +3368,7 @@
       if (!l) return;
       if (act === 'eff') { l.eff = Number(t.value); l.ssO = 0; CH.links.forEach(autoNeg); }
       else if (act === 'ss') l.ssO = Number(t.value);
+      else if (act === 'zone') l.zone = t.value || null;
       else if (act === 'neg') {
         l.negAuto = false;
         if (!t.value) l.neg = null;
@@ -3232,6 +3543,8 @@
   restoreChain();
   route();
   loadIndex(false);
+  // 로컬 개발 서버에서만: 전체 카드 텍스트 점검용 판정 함수
+  if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) window.__ygo = { analyze, classify, effKind, isActivated, actZone, effLocation, linkAction, targetSpec, summonSpec, costSpec, responseCond, summonNeg, guessOut, evMatches, immediatePart, resolvePart, faqClass, negGuess, textLang, splitEffects, CH, cardCache, validateOut, validateChain, simulate, postTriggers, linkHtml, outHtml, resolveHtml, nextHtml, segocHtml, eventHtml };
 })();
 </script>
 </body>
