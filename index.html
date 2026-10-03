@@ -4359,40 +4359,136 @@
   //  엑스텐더 : 혼자서는 시작하지 못하지만 일반 소환 없이 전개를 늘림 (스스로 특수 소환 / 다른 카드가 조건을 만들면 덱에서 카드를 가져옴)
   //  사고패 : 특수 소환 조건을 혼자 맞추기 어려운 몬스터, 일반 몬스터, 의식 몬스터
   // 덱·엑스트라 덱의 카드를 가져오는 처리: 서치·특수 소환, 묘지로 보내기·제외(묘지·제외를 쓰는 덱의 시작점), 엑스트라 덱에서 하는 소환(덱의 카드를 소재로 쓰는 융합 등)
-  const RES_RE = /덱(?:\s*\/\s*(?:패|묘지|필드|제외 상태))*에서[^.。]*?(?:패에 (?:넣|더)|특수 소환|묘지로 보[내낸]|제외한다|제외하고)|엑스트라 덱에서[^.。]*?(?:특수 소환|융합 소환|싱크로 소환|엑시즈 소환|링크 소환)|(?:패 \/ 덱|덱)[^.。]*?융합 소재/;
-  const SETUP_RE = /자신 필드에[^.。]*?(?:"[^"]+"|[가-힣]+족|[가-힣]+ 속성|레벨|싱크로|엑시즈|링크|융합|의식|펜듈럼|토큰|효과|앞면)[^.。]*?(?:몬스터|카드)[^.。]*?(?:존재|있을|있는)|이 카드 이외의 자신|묘지로 보내졌을|묘지에 보내졌을|파괴되었을|파괴된 경우|제외되었을|특수 소환되었을|특수 소환된 경우|릴리스|소재로|버려졌을|되돌아갔을|공격|전투|데미지|상대가|엔드 페이즈|스탠바이 페이즈|묘지에 존재|제외되어 있는|발동했을|자신(?:의)? 묘지(?:에|의)/;
-  const segHead = (seg) => (seg.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '';
-  const needsSetup = (h) => SETUP_RE.test(String(h).replace(/[^.。,，]*?존재하지 않(?:을|는) 경우/g, ''));
+  // 덱에서 카드를 가져오는 처리 (서치 · 특수 소환 · 묘지로 · 제외 · 세트 · 필드에 놓기)
+  //  「덱 위에서 10장을 뒷면으로 제외하고」 같은 코스트, 패·필드의 소재로 하는 융합 소환은 제외
+  const RES_ACT = '(?:패에 (?:넣는다|넣고|넣을 수 있|더한다|더하고)|특수 소환(?:한다|하고|할 수 있다|하며)|묘지로 (?:보낸다|보내고|보낼 수 있)|(?<!뒷면(?: 표시)?으로 )제외(?:한다|하고)|세트한다|세트하고|(?:필드|존)에 (?:앞면 표시로 )?(?:놓는다|놓고|놓을 수 있)|장착한다)';
+  const RES_RE = new RegExp([
+    String.raw`(?<!엑스트라 |상대의 |상대 )덱(?: 위| 맨 위)?(?:\s*\/\s*(?:패|묘지|필드|제외 상태))*에서[^.。]*?${RES_ACT}`,
+    String.raw`(?<!엑스트라 |상대의 |상대 )덱(?: 및|과|와)[^.。]*?중에서[^.。]*?${RES_ACT}`,
+    String.raw`(?<!엑스트라 |상대의 |상대 )덱 \/ (?:묘지|제외 상태)(?:인|의)[^.。]*?${RES_ACT}`,
+    String.raw`(?<!엑스트라 |상대의 |상대 )덱에서[^.。]*?(?:고른다|골라|고르고)[^.。]*?(?:\.[^.。]*?)?패에 (?:넣는다|넣고|넣을 수 있)`,
+    String.raw`(?<!상대의 |상대 )덱 위에서[^.。]*?(?:넘긴다|넘기고|확인한다|확인하고)[^.。]*?(?:\.[^.。]*?)?(?:패에 (?:넣는다|넣고|넣을 수 있)|특수 소환(?:한다|할 수 있다))`,
+    String.raw`엑스트라 덱에서(?! 앞면)[^.。]*?(?:(?:특수|싱크로|엑시즈|링크) 소환(?:한다|하고|할 수 있다)|묘지로 (?:보낸다|보내고))`,
+    String.raw`(?:패 \/ 덱|덱)(?:의|에서|\s*\/)[^.。]*?융합 소재`
+  ].join('|'));
+  // 빈 필드 · 이 카드 1장만으로는 맞출 수 없는 조건 (다른 카드가 필요하거나, 어떤 일이 일어나야 함)
+  const HAND_Q = String.raw`(?:레벨 \d+|[가-힣]+족|속성|"[^"]+"|공격력 \d+|수비력 \d+|일반 몬스터|튜너)`;
+  const SETUP_RE = new RegExp([
+    // 필드 · 펜듈럼 존에 특정 카드가 있어야 함
+    String.raw`(?<!이 카드가 )필드(?: 존)?에[^.。]*?(?:"[^"]+"|[가-힣]+족|[가-힣]+ 속성|레벨|싱크로|엑시즈|링크|융합|의식|펜듈럼|토큰|효과|앞면|마법|함정)[^.。]*?(?:존재|있을|있는)`, String.raw`필드 마법 카드가[^.。]*?존재`,
+    String.raw`다른 한쪽 자신의 펜듈럼 존에[^.。]*?존재`, '장착하고 있', '패가 0장', String.raw`자신 필드에 (?:몬스터|카드)가 존재할`, 'LP가 상대보다', '드로우 페이즈',
+    String.raw`이 카드 이외의 자신(?!의 패)`, '어드밴스 소환', String.raw`상대 필드에[^.。]*?존재`,
+    String.raw`자신 필드의[^.。]*?(?:묘지로 보내|릴리스|제외하|덱으로 되돌|대상으로)`, String.raw`자신 필드에서[^.。]*?(?:묘지로 보내|릴리스|제외하)`, String.raw`자신 필드 앞면 표시의[^.。]*?(?:대상으로|묘지로 보내|릴리스)`, '세로열에 카드가', '이 카드를 묘지에서', String.raw`엑스트라 덱에서 특수 소환된[^.。]*?(?:존재|있을)`, '상대 턴에(?!도)', String.raw`상대의 필드 \/ 묘지`, '제외 상태인', '카드명을 1개 선언', String.raw`필드(?: 존)?의[^.。]*?1장을 대상으로`,
+    // 패의 특정 카드가 필요 (「패를 1장 버리고」처럼 아무 카드나 되는 것은 제외)
+    String.raw`다른[^.。]*?몬스터 1장을`, '패의 다른', String.raw`패에서[^.。]*?${HAND_Q}[^.。]*?(?:버리고|묘지로 보내고|제외하고|보여주고)`,
+    String.raw`패의[^.。]*?${HAND_Q}[^.。]*?(?:버리고|묘지로 보내고|묘지에 버리고|제외하고|보여주고)`,
+    String.raw`이 카드와(?!는)[^.。]*?(?:몬스터|카드) 1장|(?:몬스터|카드) 1장과 이 카드를`,
+    String.raw`이 카드를 포함하는[^.。]*?(?:"[^"]+"|[가-힣]+족|속성|필드)`,
+    // 무언가 일어나야 함
+    '묘지로 보내졌을', '묘지에 보내졌을', '파괴되었을', '파괴된 경우', '제외되었을', '특수 소환되었을', '특수 소환된 경우', '(?<!이 카드를 )릴리스', '소재로', '버려졌을', '되돌아갔을', '넣어졌을', '더해졌을',
+    '공격(?!력)', '전투', '데미지를 받았을', '데미지를 주었을', '데미지 계산', '상대가(?! 고른| 선택)', '엔드 페이즈', '스탠바이 페이즈', '발동했을', String.raw`카운터를[^.。]*?제거`, String.raw`카운터가`,
+    // 묘지 · 제외 상태의 카드가 필요하거나, 묘지 · 제외 상태에서 쓰는 효과
+    String.raw`이 카드 이외의 "[^"]+"`,
+    '묘지에 존재', '제외되어 있는', '묘지의 이 카드', '제외 상태인 이 카드', String.raw`자신(?:의)? 묘지(?:에|의)`, '상대 묘지에 존재',
+    String.raw`묘지의[^.。]*?(?:몬스터|카드)[^.。]*?(?:대상으로|제외하고|덱으로 되돌리고)`
+  ].join('|'));
+  // 효과의 조건·코스트 부분
+  //  「발동할 수 있다」 앞 (덱에서 가져오는 처리가 「●」 선택지 안에 있으면 그 선택지의 조건까지 포함)
+  //  그 표현이 없는 옛 텍스트는 덱에서 카드를 가져오는 부분 앞까지
+  const segHead = (seg) => {
+    const s = seg.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '');
+    const ACT = /발동할 수 있다|발동한다/g;
+    const r = s.match(RES_RE);
+    if (r) {
+      const bul = s.lastIndexOf('●', r.index);
+      if (bul >= 0) {   // 「●」 선택지 안: 선택지 앞의 공통 부분 + 그 선택지의 조건
+        const part = s.slice(bul + 1, r.index), acts = [...part.matchAll(ACT)];
+        const intro = s.slice(0, s.indexOf('●')), ie = intro.search(/발동할 수 있다|발동한다|적용한다|적용할 수 있다/);
+        return (ie >= 0 ? intro.slice(0, ie) : intro) + ' ' + (acts.length ? part.slice(0, acts[acts.length - 1].index) : part);
+      }
+      // 덱에서 가져오는 것이 코스트이면 (「덱에서 ~를 묘지로 보내고, ~를 대상으로 하여 발동할 수 있다」) 그 발동 조건 전체
+      const after = s.slice(r.index).match(/^[^.。]*?(?:발동할 수 있다|발동한다)/);
+      if (after) return s.slice(0, r.index + after[0].length).replace(/(?:발동할 수 있다|발동한다)$/, '');
+      const acts = [...s.slice(0, r.index).matchAll(ACT)];
+      if (acts.length) return s.slice(0, acts[acts.length - 1].index);
+      const st = Math.max(s.lastIndexOf('.', r.index), s.lastIndexOf('。', r.index)) + 1, part = s.slice(st, r.index + r[0].length);
+      return part.slice(0, part.lastIndexOf('덱'));
+    }
+    const m = s.match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/);
+    return m ? m[1] : '';
+  };
+  // 전투로만 일어나는 조건 (「전투 / 효과로 파괴」처럼 효과로도 되는 것은 제외)
+  const BATTLE_RE = { test: (h) => /전투(?! 이외)|공격(?!력)|데미지를 (?:받|주)/.test(String(h).replace(/전투\s*(?:\/|또는)\s*(?:카드의 |상대(?:의)? )?효과/g, '효과')) };
+  // 어떤 일이 일어났을 때 발동하는 조건 (「~가 존재할 경우」 같은 상태 조건과 구별)
+  //  「했을/되었을/벗어났을/보냈을 경우」처럼 받침 ㅆ + 「을 경우·때」, 「~한 경우」, 「~할 때마다」, 「~시에」
+  const TRIG_RE = { test: (h) => /(?:한|된) (?:경우|때)|(?:될|할|하는|되는) 때(?:마다|에|,)|(?<!개시|발동)(?:시|시기)에[, ]/.test(h) || [...String(h).matchAll(/([가-힣])을 (?:경우|때)/g)].some(m => m[1] !== '있' && (m[1].charCodeAt(0) - 0xAC00) % 28 === 20) };
+  const FLIP_RE = /리버스\s*[:：]|리버스했을|리버스할 경우|리버스에 성공/;
+  // c: 코스트를 이 카드 자신으로 낼 수 있으면 (「자신 필드의 식물족 몬스터 1장을 릴리스」를 식물족인 이 카드로) 조건에서 뺌
+  const needsSetup = (h, c, seg) => {
+    let x = String(h).replace(/[^.。,，]*?존재하지 않(?:을|는) 경우/g, '').replace(/필드 위(에|의)/g, '필드$1').replace(/선택하고/g, '대상으로 하고');   // 옛 텍스트 표기
+    if (c && c.ct === 'monster' && !/패에 (?:있|존재)|이 카드를 패에서|패에서 이 카드를|패의 이 카드를/.test(seg || x)) x = x.replace(/(?<!이외의 |이 카드와 )자신 필드의 (?:앞면 표시(?:의)? )?((?:[가-힣]+족|[가-힣]+ 속성|"[^"]+")(?: \/ (?:[가-힣]+족|[가-힣]+ 속성))?)?\s*(?:몬스터|카드) 1장을 (?:릴리스|묘지로 보내|제외하)[가-힣]*/g, (all, q) => {
+      if (!q) return '';
+      const ok = q.split(' / ').every(p => p.endsWith('족') ? c.race === p : p.endsWith('속성') ? c.attr + ' 속성' === p : c.name.includes(p.replace(/"/g, '')));
+      return ok ? '' : all;
+    });
+    return SETUP_RE.test(x);
+  };
   const roleCache = new Map();
   function dkRoleInfo(c) {
     if (!c) return { role: 'other', why: '' };
     if (roleCache.has(c.kid)) return roleCache.get(c.kid);
-    const t = c.text, segs = splitEffects(t), list = segs.length ? segs : [t];
-    const isMon = c.ct === 'monster', noNS = /통상 소환할 수 없다/.test(t);
-    const ssSeg = isMon ? list.find(x => /이 카드를 (?:패|묘지|패 \/ 묘지)에서 특수 소환|(?:패|묘지)에서 이 카드를 특수 소환|이 카드는 [^.。]*?(?:패|묘지)에서 특수 소환할 수 있다/.test(x)) : null;
+    const t = c.text, isMon = c.ct === 'monster', ritual = c.types.includes('의식');
+    const noNS = /통상 소환할 수 없다/.test(t) || ritual   // 의식 몬스터도 일반 소환할 수 없음
+      || (c.lv > 4 && !c.types.includes('펜듈럼') && !/릴리스 없이[^.。]*?(?:일반|통상) 소환/.test(t));   // 레벨 5 이상은 릴리스가 필요
+    const pend = (t.match(/【펜듈럼 효과】([\s\S]*?)【몬스터 효과】/) || [])[1] || '';
+    // 효과마다, 「●」 선택지가 있으면 선택지마다 따로 본다 (리버스 효과는 전개에 쓰기 어려워 제외)
+    const segs = splitEffects(t), list = (segs.length ? segs : [t]).flatMap(x => { const p = x.split('●'); return p.length < 2 ? [x] : p.slice(1).map(b => p[0] + '●' + b); }).filter(x => !FLIP_RE.test(x));
+    const inPend = (seg) => !!pend && pend.includes(seg.slice(0, 40));
+    const ssSeg = isMon ? list.find(x => !inPend(x) && /이 카드를 (?:패|묘지|패 \/ 묘지)에서 [^.。]*?특수 소환|(?:패|묘지)에서 이 카드를 특수 소환|이 카드는 [^.。]*?(?:패|묘지)에서 [^.。]*?특수 소환할 수 있다|이 카드가 (?:패|묘지|패 \/ 묘지)에 (?:존재|있)[^.。]*?(?:경우|때)[\s\S]*?이 카드를 특수 소환/.test(x) && !BATTLE_RE.test(segHead(x) || x.split(/[.。]/)[0])) : null;
     const ssHead = ssSeg ? (segHead(ssSeg) || ssSeg.split(/[.。]/)[0]) : '';
-    const ssAlone = !!ssSeg && !needsSetup(ssHead) && !/엔드 페이즈|스탠바이 페이즈/.test(ssHead);
-    let info = null;
-    if (roleHit(ROLES[0], t)) info = { role: 'handtrap', why: '상대 턴에 패에서 발동하는 방해' };
+    const ssAlone = !!ssSeg && !needsSetup(ssHead, c, ssSeg) && !/엔드 페이즈|스탠바이 페이즈/.test(ssHead);
+    let info = null, ext = null;
+    if (c.extra) info = { role: 'other', why: '엑스트라 덱 몬스터' };
+    else if (roleHit(ROLES[0], t)) info = { role: 'handtrap', why: '상대 턴에 패에서 발동하는 방해' };
     else {
       for (let i = 0; i < list.length && !info; i++) {
         const seg = list[i];
         if (!RES_RE.test(seg) || c.ct === 'trap') continue;
         const h = segHead(seg);
-        if (needsSetup(h)) continue;
-        if (c.ct === 'spell') { if (i === 0 || !/(?:경우|때)/.test(h)) info = { role: 'starter', ns: false, why: '발동만으로 덱에서 카드를 가져옴' }; continue; }
-        if (/패에서 이 카드를|이 카드를 패에서|패의 이 카드를/.test(h)) { info = { role: 'starter', ns: false, why: '패에서 이 카드만으로 발동해 덱에서 카드를 가져옴' }; continue; }
+        if (needsSetup(h, c, seg)) { if (!ext && !BATTLE_RE.test(h)) ext = '다른 카드가 조건을 만들면 덱에서 카드를 가져옴'; continue; }
+        if (c.ct === 'spell') {
+          if (TRIG_RE.test(h)) { if (!ext) ext = '어떤 일이 일어나면 덱에서 카드를 가져옴'; }
+          else info = { role: 'starter', ns: false, why: '발동만으로 덱에서 카드를 가져옴' };
+          continue;
+        }
+        if (inPend(seg)) { if (!TRIG_RE.test(h)) info = { role: 'starter', ns: false, why: '펜듈럼 존에 놓고 발동해 덱에서 카드를 가져옴' }; continue; }
+        if (/패에서 이 카드를|이 카드를 패에서|패의 이 카드를|이 카드가 패에 (?:존재|있)/.test(h)) {
+          if (!/이 카드를 포함하는[^.。]*?"/.test(seg)) info = { role: 'starter', ns: false, why: '패에서 이 카드만으로 발동해 덱에서 카드를 가져옴' };
+          else if (!ext) ext = '패의 다른 카드와 함께 발동해 덱에서 카드를 가져옴';
+          continue;
+        }
         const hs = h.replace(/특수 소환/g, '§');
-        if (/일반 소환|소환에 성공했을|소환했을 (?:경우|때)|소환되었을 경우/.test(hs)) { if (!noNS) info = { role: 'starter', ns: true, why: '일반 소환하면 덱에서 카드를 가져옴 (일반 소환 사용)' }; else if (ssAlone) info = { role: 'starter', ns: false, why: '스스로 특수 소환하고 덱에서 카드를 가져옴' }; continue; }
-        if (/§(?:했을|에 성공했을|된|되었을)/.test(hs)) { if (ssAlone) info = { role: 'starter', ns: false, why: '빈 필드에서 스스로 특수 소환하고 덱에서 카드를 가져옴' }; continue; }
-        if (!/(?:경우|때)/.test(h) && isMon) {
+        if (/일반 소환|소환에 성공했을|소환했을 (?:경우|때)|소환되었을 경우/.test(hs)) {
+          const nsOnly = /일반 소환/.test(hs) && !/§/.test(hs);
+          if (ssAlone && !nsOnly) info = { role: 'starter', ns: false, why: '스스로 특수 소환하고 덱에서 카드를 가져옴' };
+          else if (!noNS) info = { role: 'starter', ns: true, why: '일반 소환하면 덱에서 카드를 가져옴 (일반 소환 사용)' };
+          else if (!nsOnly && !ext) ext = '특수 소환되면 덱에서 카드를 가져옴';
+          continue;
+        }
+        if (/§(?:했을|에 성공했을|된|되었을)/.test(hs)) { if (ssAlone) info = { role: 'starter', ns: false, why: '빈 필드에서 스스로 특수 소환하고 덱에서 카드를 가져옴' }; else if (!ext) ext = '특수 소환되면 덱에서 카드를 가져옴'; continue; }
+        if (!TRIG_RE.test(h) && isMon) {
           if (ssAlone) info = { role: 'starter', ns: false, why: '스스로 특수 소환한 뒤 덱에서 카드를 가져옴' };
           else if (!noNS) info = { role: 'starter', ns: true, why: '일반 소환해서 효과를 쓰면 덱에서 카드를 가져옴 (일반 소환 사용)' };
-        }
+          else if (!ext) ext = '특수 소환한 뒤 덱에서 카드를 가져옴';
+        } else if (!ext && !BATTLE_RE.test(h)) ext = '어떤 일이 일어나면 덱에서 카드를 가져옴';
       }
       if (!info && ssSeg) info = { role: 'extender', why: ssAlone ? '빈 필드에서도 스스로 특수 소환 (일반 소환 없이 몸을 늘림)' : '조건을 만족하면 스스로 특수 소환' };
-      if (!info && c.ct !== 'trap' && list.some(seg => RES_RE.test(seg) && needsSetup(segHead(seg)))) info = { role: 'extender', why: '다른 카드가 조건을 만들면 덱에서 카드를 가져옴' };
-      if (!info && isMon && (noNS || (c.types.includes('일반') && !c.types.includes('효과')) || c.types.includes('의식'))) info = { role: 'brick', why: noNS ? '특수 소환 조건을 혼자 맞추기 어려움' : (c.types.includes('의식') ? '의식 마법·릴리스가 필요' : '효과가 없는 일반 몬스터') };
+      if (!info && ext) info = { role: 'extender', why: ext };
+      if (info && ritual && info.role === 'extender') info = null;   // 의식 몬스터는 의식 마법이 있어야 움직임
+      const handUse = /마법 카드로 취급하고 패에서 마법 & 함정 존에 세트/.test(t) || list.some(x => /패에서 (?:이 카드를|버리)|이 카드를 패에서|이 카드가 패에 (?:있|존재)|패(?: \/ 필드)?의 이 카드를/.test(segHead(x) || x));
+      const tribute = c.lv > 4 && !/통상 소환할 수 없다/.test(t) && !ritual;
+      if (!info && isMon && (c.types.includes('일반') && !c.types.includes('효과'))) info = { role: 'brick', why: '효과가 없는 일반 몬스터' };
+      if (!info && isMon && noNS && !handUse) info = { role: 'brick', why: ritual ? '의식 마법·릴리스가 필요' : tribute ? '레벨 5 이상이라 일반 소환하려면 릴리스가 필요' : '특수 소환 조건을 혼자 맞추기 어려움' };
       if (!info) info = { role: 'other', why: '' };
     }
     roleCache.set(c.kid, info);
