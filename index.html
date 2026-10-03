@@ -1579,6 +1579,8 @@
   const ACTIONS = ['특수 소환', '묘지로 보내', '제외', '패에 넣', '넣'];
   const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const SUMMON_ALT = /소환(?:할|될|하는|되는)\s*(?:때|시기)/;
+  const RACE_KO = { Dragon: '드래곤', Warrior: '전사', Spellcaster: '마법사', Fairy: '천사', Fiend: '악마', Zombie: '언데드', Machine: '기계', Aqua: '물', Pyro: '화염', Rock: '암석', 'Winged Beast': '비행야수', Plant: '식물', Insect: '곤충', Thunder: '번개', Beast: '야수', 'Beast-Warrior': '야수전사', Dinosaur: '공룡', Fish: '어류', 'Sea Serpent': '해룡', Reptile: '파충류', Psychic: '사이킥', 'Divine-Beast': '환신야수', 'Creator God': '창조신', Wyrm: '환룡', Cyberse: '사이버스', Illusion: '환상마' };
+  const KIND_EN = { 융합: 'Fusion', 싱크로: 'Synchro', 엑시즈: 'XYZ', 링크: 'Link', 의식: 'Ritual', 펜듈럼: 'Pendulum' };
   function parseClause(clause) {
     const hasM = /몬스터/.test(clause), hasS = /마법/.test(clause), hasT = /함정/.test(clause);
     let kind = 'any';
@@ -1845,6 +1847,10 @@
         const pss = Math.max(2, linkSS(CH.links[i - 1]));
         const k = effectsOf(l.m).findIndex(e => e.ss >= pss);
         if (k >= 0) l.eff = k;
+      } else if (CH.ev.type === 'summon') {
+        // 소환 무효 타이밍: 소환을 무효로 하는 효과를 우선 선택
+        const k = effectsOf(l.m).findIndex(e => summonNeg(e.text));
+        if (k >= 0) l.eff = k;
       }
       autoNeg(l);
     }
@@ -1928,6 +1934,31 @@
       else if (CH.dmg && e.dmgOK !== true && !(ss === 3 || e.kind === 'trigger' || DMG_OK.test(e.text)))
         r.err.push('데미지 스텝 중에는 카운터 함정, 공격력·수비력을 직접 변동시키는 효과, 발동을 무효로 하는 효과, 데미지 스텝 발동이 명시된 효과만 발동할 수 있습니다.');
 
+      // 4-1. 「상대가 몬스터를 특수 소환할 시기에」처럼 소환 자체에만 대응하는 효과 (「~가 발동했을 때」 문구 없음)
+      {
+        const sn = summonNeg(e.text), head = (e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '';
+        if (sn && SUMMON_ALT.test(head) && !responseCond(e.text) && i > 0) {
+          const pnm = prev && prev.m ? `체인 ${i} 「${nameOf(prev.m)}」` : `체인 ${i}`;
+          r.err.push(`이 효과는 몬스터가 소환될 때(체인 블록을 만들지 않는 소환)에만 체인 1로 발동할 수 있습니다. ${pnm}의 효과 발동에는 체인할 수 없고, 그 효과의 처리로 특수 소환되는 몬스터에도 발동할 수 없습니다 (공식 FAQ, Q&A #12750 · #24054).`);
+        }
+      }
+
+      // 4-2. 효과로 특수 소환하는 몬스터가 텍스트의 조건에 맞는지
+      {
+        const sm = summonSpec(e);
+        if (sm && sm.mode === 'pick') for (const kid of (l.sumK || [])) {
+          const sm2 = cardCache.get(kid), pd = sm2 && sm2.pd; if (!pd) continue;
+          const nm = `「${nameOf(sm2)}」`, raceKo = RACE_KO[pd.race], type = String(pd.type || '');
+          if (sm.race && raceKo && raceKo !== sm.race) r.err.push(`${nm}은(는) ${raceKo}족이라 소환할 수 없습니다. 이 효과는 ${sm.race}족 몬스터만 특수 소환합니다.`);
+          if (sm.kind && KIND_EN[sm.kind] && !type.includes(KIND_EN[sm.kind])) r.err.push(`${nm}은(는) ${sm.kind} 몬스터가 아니라 소환할 수 없습니다.`);
+          if (sm.from === '엑스트라 덱' && !/Fusion|Synchro|XYZ|Link/.test(type)) r.err.push(`${nm}은(는) 엑스트라 덱의 몬스터가 아닙니다.`);
+          if (sm.sameLv) {
+            const t0 = (l.tg || [])[0], tb = t0 && boardItems().find(b => b.id === t0), tlv = tb && tb.m.pd && tb.m.pd.level;
+            if (tlv && pd.level && tlv !== pd.level) r.err.push(`${nm}은(는) 레벨 ${pd.level}이라 소환할 수 없습니다. 대상 「${nameOf(tb.m)}」와 같은 레벨 ${tlv}의 몬스터만 특수 소환합니다.`);
+          }
+        }
+      }
+
       // 5. 「~가 발동했을 때」 조건: 직전 체인에 직접 체인해야 하고, 그 효과가 조건을 만족해야 함
       { const rp = respErrors(l, i); r.err.push(...rp.err); r.info.push(...rp.info); }
 
@@ -2003,7 +2034,17 @@
     let best = null, bi = 1e9;
     for (const [k, re] of cands) { const mm = r.match(re); if (mm && mm.index < bi) { bi = mm.index; best = k; } }
     if (!best) return null;
-    return { type: best, then: /그 후|그 뒤/.test(r.slice(bi)) };
+    // 그 처리의 목적어 (직전 「.」「,」 뒤부터 동사까지)
+    const head = r.slice(0, bi), cut = Math.max(head.lastIndexOf('.'), head.lastIndexOf('。'), head.lastIndexOf(','), head.lastIndexOf('，'));
+    const obj = head.slice(cut + 1);
+    return {
+      type: best, then: /그 후|그 뒤/.test(r.slice(bi)),
+      // 「이 카드를 엑스트라 덱으로 되돌리고」: 대상이 아니라 자기 자신을 처리
+      self: /이 카드(?:를|을)?/.test(obj) && !/이 카드 이외/.test(obj),
+      // 「그 소환을 무효로 하고, 그 몬스터를 파괴한다」: 소환하려던 몬스터
+      ref: summonNeg(e.text) && /^\s*(?:그 몬스터|그것|그 카드)/.test(obj) ? 'summon' : null,
+      extra: /엑스트라 덱/.test(obj + r.slice(bi, bi + 12))
+    };
   }
   // 대상(또는 영향 받는 카드)의 조건
   function targetSpec(e) {
@@ -2038,13 +2079,18 @@
     const r = resolvePart(e.text);
     const mm = r.match(/([^.。]*?)\s*특수 소환(?:한다|하고|할 수 있다)/);
     if (!mm) return null;
-    const obj = mm[1];
+    const obj = mm[1].split(/[,，]/).pop();   // 「이 카드를 엑스트라 덱으로 되돌리고, ○○를 특수 소환한다」의 앞 처리 제외
     const n = (obj.match(/(\d+)장/) || [])[1];
     const after = r.slice(r.indexOf(mm[0]) + mm[0].length);
+    const as = (obj.match(/(융합|싱크로|엑시즈|링크|의식) 소환으로 취급/) || [])[1] || null;
+    const race = (obj.match(/(\S+)족/) || [])[1] || null;
+    const kind = (obj.match(/(융합|싱크로|엑시즈|링크|의식|펜듈럼) 몬스터/) || [])[1] || null;
     return {
-      mode: /이 카드를/.test(obj) ? 'self' : (/그 몬스터|그 카드|대상 몬스터/.test(obj) ? 'target' : 'pick'),
+      mode: /이 카드를/.test(obj) ? 'self' : (/(?:그 몬스터|그 카드|대상 몬스터|대상으로 한 몬스터)(?:를|을)/.test(obj) ? 'target' : 'pick'),
       n: n ? +n : 1, opp: /상대 필드에/.test(obj), then: /그 후|그 뒤/.test(after),
-      optional: /특수 소환할 수 있다/.test(r)
+      optional: /특수 소환할 수 있다/.test(r),
+      as, race, kind, sameLv: /대상 몬스터와 같은 레벨|그 몬스터와 같은 레벨/.test(obj),
+      from: /엑스트라 덱에서/.test(obj) ? '엑스트라 덱' : (/덱에서/.test(obj) ? '덱' : (/묘지에서/.test(obj) ? '묘지' : (/패에서/.test(obj) ? '패' : null)))
     };
   }
 
@@ -2197,8 +2243,10 @@
       // 효과 처리: 카드 이동
       if (S.s === 'ok' && e) {
         const act = linkAction(e);
-        let victims = tg.filter(id => onField(board.get(id)));
-        if (act && spec && spec.self) {
+        let victims = act && act.ref === 'summon' ? [] : tg.filter(id => onField(board.get(id)));
+        if (act && act.ref === 'summon') {
+          // 소환 무효와 함께 하는 처리: 소환하려던 몬스터가 대상 (필드의 다른 카드가 아님)
+        } else if (act && ((spec && spec.self) || act.self)) {
           // 「이 카드를 패로 되돌린다」: 자기 자신
           const own = board.get('L' + l.uid) || [...board.values()].find(b => b.out && b.kid === l.kid && b.ctrl === l.ctrl && onField(b));
           victims = own && onField(own) ? [own.id] : [];
@@ -2246,9 +2294,9 @@
           }
           const gone = victims.filter(id => !prot.includes(id));
           gone.forEach(id => { const b = board.get(id); b.loc = LOC_AFTER[act.type]; events.push({ id, b, type: act.type, pos, i, then: act.then }); });
-          const DONE_KO = { destroy: '파괴되어 묘지로 보내집니다', banish: '제외됩니다', hand: '패로 되돌아갑니다', deck: '덱으로 되돌아갑니다', gy: '묘지로 보내집니다' };
+          const DONE_KO = { destroy: '파괴되어 묘지로 보내집니다', banish: '제외됩니다', hand: '패로 되돌아갑니다', deck: act.extra ? '엑스트라 덱으로 되돌아갑니다' : '덱으로 되돌아갑니다', gy: '묘지로 보내집니다' };
           if (gone.length) S.notes.push(`${gone.map(id => '「' + nameOf(board.get(id).m) + '」').join('·')}: ${DONE_KO[act.type]}.`);
-        } else if (act && spec && !tg.length && !spec.self && !spec.pick) S.notes.push(`${spec.targeting ? '대상' : '처리할 카드'}를 지정하면 카드 이동과 그 뒤의 유발 효과까지 계산합니다.`);
+        } else if (act && spec && !tg.length && !spec.self && !act.self && !spec.pick && act.ref !== 'summon') S.notes.push(`${spec.targeting ? '대상' : '처리할 카드'}를 지정하면 카드 이동과 그 뒤의 유발 효과까지 계산합니다.`);
         // 효과에 의한 특수 소환
         const sm = summonSpec(e);
         if (sm) {
@@ -2261,16 +2309,20 @@
           } else if (sm.mode === 'target') {
             tg.forEach(id => { const b = board.get(id); if (b && !onField(b) && b.loc !== 'hand') { b.loc = 'field'; b.ctrl = newCtrl; summoned.push(b); } });
             if (!summoned.length) S.notes.push('대상 몬스터가 남아 있지 않아 특수 소환하지 않습니다.');
+          } else if (sm.sameLv && spec && spec.targeting && !tg.some(id => (board.get(id) || {}).loc === 'field')) {
+            S.notes.push('처리할 때 대상 몬스터가 몬스터 존에 앞면 표시로 없어, 같은 레벨의 몬스터를 특수 소환하지 않습니다.');
+          } else if (sm.sameLv && act && act.self && !victims.length) {
+            S.notes.push('이 카드를 되돌릴 수 없어 특수 소환하지 않습니다.');
           } else {
             (l.sumK || []).slice(0, sm.n).forEach((kid, n) => {
               const m = cardCache.get(kid); if (!m) return;
-              const b = { id: 'S' + l.uid + '_' + n, m, kid, ctrl: newCtrl, loc: 'field', summonedBy: l };
+              const b = { id: 'S' + l.uid + '_' + n, m, kid, ctrl: newCtrl, loc: 'field', summonedBy: l, as: sm.as };
               board.set(b.id, b); summoned.push(b);
             });
             if (!summoned.length) S.notes.push('특수 소환하는 몬스터를 체인 카드에 넣으면, 그 몬스터의 「특수 소환했을 경우」 효과와 다른 카드의 반응까지 계산합니다.');
           }
-          summoned.forEach(b => events.push({ id: b.id, b, type: 'summon', pos, i, then: sm.then || (act && act.then) }));
-          if (summoned.length) S.notes.push(`${summoned.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${b2side(newCtrl)} 필드에 특수 소환됩니다${sm.optional ? ' (임의)' : ''}.`);
+          summoned.forEach(b => events.push({ id: b.id, b, type: 'summon', pos, i, then: sm.then || (act && act.then), as: sm.as }));
+          if (summoned.length) S.notes.push(`${summoned.map(b => '「' + nameOf(b.m) + '」').join('·')}: ${b2side(newCtrl)} 필드에 ${sm.as ? sm.as + ' 소환으로 취급하여 ' : ''}특수 소환됩니다${sm.optional ? ' (임의)' : ''}.${sm.as ? ` ${sm.as} 소환 취급이라 「${sm.as} 소환했을 경우」 효과는 유발되지만, 효과 처리 중의 특수 소환이므로 「신의 경고」 등 소환을 무효로 하는 효과로는 무효로 할 수 없습니다 (공식 Q&A #12750).` : ''}`);
         }
       }
     }
@@ -2281,7 +2333,7 @@
   const b2side = (c) => c === 'me' ? '나의' : '상대의';
   // ---------- 처리 후 유발 효과 · 타이밍 놓침 ----------
   const EVT_RE = { discard: /버려졌을|버려진 경우/, destroy: /파괴되었을|파괴된 경우|파괴되어|파괴됐을/, gy: /묘지로 보내졌을|묘지에 보내졌을/, banish: /제외되었을|제외된 경우/, hand: /패로 되돌아갔을|패로 돌아갔을/, deck: /덱으로 되돌아갔을/, leave: /필드에서 벗어났을|필드를 벗어났을/ };
-  function evMatches(cond, type) {
+  function evMatches(cond, type, evn) {
     if (EVT_RE.leave.test(cond)) return true;
     const battleOnly = /전투로 파괴/.test(cond) && !/효과/.test(cond);
     if (type === 'destroy') return (EVT_RE.destroy.test(cond) && !battleOnly) || EVT_RE.gy.test(cond);
@@ -2289,6 +2341,7 @@
     if (type === 'discard') return EVT_RE.discard.test(cond) || EVT_RE.gy.test(cond);
     if (type === 'summon') {
       // 효과에 의한 특수 소환: 「특수 소환」이 들어간 조건만 (「소환에 성공했을」만 있으면 일반 소환)
+      if (evn && evn.as && new RegExp(evn.as + ' 소환(?:했을|되었을|에 성공했을|된 경우)').test(cond)) return true;
       if (!/특수 소환/.test(cond)) return false;
       if (/(융합|싱크로|엑시즈|링크|펜듈럼|의식) 소환/.test(cond) && !/특수 소환(?:했을|되었을|에 성공)/.test(cond.replace(/(융합|싱크로|엑시즈|링크|펜듈럼|의식) 소환/g, ''))) return false;
       return /특수 소환(?:했을|되었을|에 성공했을|된 경우)|소환(?:했을|되었을)/.test(cond);
@@ -2315,7 +2368,7 @@
       analyze(evn.b.m).chain.forEach((e, k) => {
         if (e.kind !== 'trigger') return;
         const cm = e.text.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([^.。]*?)(?:경우|때)/);
-        if (cm && /이 카드가|이 카드를/.test(cm[1]) && evMatches(cm[1], evn.type) && !(/필드에서/.test(cm[1]) && evn.cost && !evn.fromField)) push(evn.b, k, e, evn, false);
+        if (cm && /이 카드가|이 카드를/.test(cm[1]) && evMatches(cm[1], evn.type, evn) && !(/필드에서/.test(cm[1]) && evn.cost && !evn.fromField)) push(evn.b, k, e, evn, false);
       });
     }
     // 다른 카드의 「자신 / 상대 필드의 카드가 ~되었을 경우」 같은 유발 효과
@@ -2488,14 +2541,17 @@
     const spec = targetSpec(e), act = linkAction(e);
     if (!spec.targeting && !act) return '';
     const head = '<div class="mt-2 text-[11px] text-slate-400"><i class="fa-solid fa-crosshairs mr-1"></i>';
+    const selfLine = act && act.self ? `${head}처리: 이 카드를 ${act.type === 'deck' && act.extra ? '엑스트라 덱으로 되돌림' : ACT_KO[act.type]} (자동)</div>` : '';
+    if (act && act.ref === 'summon' && !spec.targeting) return `${head}처리: 소환을 무효로 하고 소환하려던 그 몬스터를 ${ACT_KO[act.type]} (자동)</div>`;
+    if (act && act.self && !spec.targeting) return selfLine;
     if (spec.self) return `${head}처리: 이 카드를 ${ACT_KO[act.type]} (자동)</div>`;
     if (spec.pick) return `${head}처리 시 자동 선택: ${{ opp: '상대 필드의', self: '자신 필드의', both: '필드의' }[spec.whose]} ${spec.stat === 'def' ? '수비력' : '공격력'}이 ${spec.pick === 'max' ? '가장 높은' : '가장 낮은'} ${spec.cat === 'mon' ? '몬스터' : '카드'} · ${ACT_KO[act.type]}${spec.optional ? ' (임의)' : ''}</div>`;
     const cands = boardItems().filter(b => candMatch(spec, b, l));
     const sel = l.tg || [];
-    const title = `${spec.targeting ? '대상 (발동할 때 지정)' : '처리할 카드 (처리 시 고름 · 예상)'} · ${spec.max >= 99 ? '해당 카드 전부' : '최대 ' + spec.max + '장'}${act ? ' · ' + ACT_KO[act.type] : ''}`;
+    const title = `${spec.targeting ? '대상 (발동할 때 지정)' : '처리할 카드 (처리 시 고름 · 예상)'} · ${spec.max >= 99 ? '해당 카드 전부' : '최대 ' + spec.max + '장'}${act && !act.self ? ' · ' + ACT_KO[act.type] : ''}`;
     const chips = cands.map(b => `<button data-act="tg" data-uid="${l.uid}" data-id="${b.id}" class="rounded-full px-2 py-1 text-[11px] font-bold border ${sel.includes(b.id) ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-700 text-slate-300 bg-slate-800/80'}">${esc(nameOf(b.m))} <span class="${sel.includes(b.id) ? '' : (b.ctrl === 'me' ? 'text-sky-300' : 'text-rose-300')}">${b.ctrl === 'me' ? '나' : '상대'}</span>${b.loc === 'set' ? ' · 세트' : ''}</button>`).join('');
     return `<div class="mt-2"><div class="text-[11px] text-slate-400"><i class="fa-solid fa-crosshairs mr-1"></i>${esc(title)}</div>
-      ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : '<p class="text-[11px] text-slate-500 mt-1 break-keep">고를 수 있는 카드가 없습니다. 위 「필드의 카드」 칸에 카드를 추가하면 여기서 고를 수 있습니다.</p>'}</div>`;
+      ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : '<p class="text-[11px] text-slate-500 mt-1 break-keep">고를 수 있는 카드가 없습니다. 위 「필드의 카드」 칸에 카드를 추가하면 여기서 고를 수 있습니다.</p>'}</div>${selfLine}`;
   }
 
   function costPicker(l, e) {
@@ -2518,7 +2574,8 @@
     if (sm.mode === 'self') return `<div class="mt-2 text-[11px] text-slate-400">${head}처리: 이 카드를 특수 소환 (자동)</div>`;
     if (sm.mode === 'target') return `<div class="mt-2 text-[11px] text-slate-400">${head}처리: 대상으로 한 몬스터를 특수 소환 (위에서 대상을 고르세요)</div>`;
     const chips = (l.sumK || []).map((kid, n) => `<button data-act="sumDel" data-uid="${l.uid}" data-n="${n}" class="rounded-full px-2 py-1 text-[11px] font-bold border bg-emerald-500 border-emerald-500 text-ink-900">${esc(cardName(kid))} <i class="fa-solid fa-xmark ml-0.5"></i></button>`).join('');
-    return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}처리: 몬스터 ${sm.n}장을 특수 소환${sm.optional ? ' (임의)' : ''} · 소환한 몬스터를 넣으면 그 몬스터의 유발 효과와 다른 카드의 반응을 계산합니다</div>
+    const cond = [sm.from && sm.from + '에서', sm.sameLv && '대상과 같은 레벨의', sm.race && sm.race + '족', sm.kind ? sm.kind + ' 몬스터' : '몬스터', sm.n + '장을', sm.as && sm.as + ' 소환으로 취급하여'].filter(Boolean).join(' ');
+    return `<div class="mt-2"><div class="text-[11px] text-slate-400">${head}처리: ${esc(cond)} 특수 소환${sm.optional ? ' (임의)' : ''} · 소환한 몬스터를 넣으면 그 몬스터의 유발 효과와 다른 카드의 반응을 계산합니다</div>
       ${chips ? `<div class="flex flex-wrap gap-1 mt-1">${chips}</div>` : ''}
       <input data-act="sumAdd" data-uid="${l.uid}" type="search" autocomplete="off" spellcheck="false" placeholder="특수 소환한 몬스터 (선택 · 이름/초성)" class="w-full ${SEL} py-1.5 mt-1"><div id="sumRes-${l.uid}" class="mt-1 rounded-lg overflow-hidden bg-slate-800/60"></div></div>`;
   }
