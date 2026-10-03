@@ -4092,6 +4092,14 @@
     DK._st = { reg: DK.reg, ht: ht.filter(k => DK.byKid.has(k) && dkLim(k) > 0), gen: gen.filter(k => DK.byKid.has(k) && dkLim(k) > 0) };
     return DK._st;
   }
+  // 받침에 따른 조사: jo('알버스의 낙윤', '과', '와') → '알버스의 낙윤과'
+  function jo(w, withB, noB) {
+    const t = String(w).replace(/[」』"')\]\s]+$/, ''), ch = t.charCodeAt(t.length - 1);
+    if (!(ch >= 0xAC00 && ch <= 0xD7A3)) return w + (withB === '으로' ? '(으)로' : `${withB}(${noB})`);
+    const fin = (ch - 0xAC00) % 28;
+    if (withB === '으로') return w + (fin && fin !== 8 ? '으로' : '로');
+    return w + (fin ? withB : noB);
+  }
   const dkLim = (kid) => { const L = DK.ban && DK.ban[DK.reg]; const v = L && L.list[String(kid)]; return v === undefined ? 3 : v; };
   function dkRow(r) {
     const [kid, name, ct, prop, props, attr, lv, atk, def, link, pass, arch, text] = r;
@@ -4346,30 +4354,51 @@
   // ---------- 덱 시뮬레이션 ----------
   const SIM_ROLES = [['starter', '스타터', 'bg-emerald-600 text-white'], ['extender', '엑스텐더', 'bg-sky-600 text-white'], ['handtrap', '패 트랩', 'bg-violet-600 text-white'], ['other', '기타', 'bg-slate-600 text-slate-100'], ['brick', '사고패', 'bg-rose-700 text-white']];
   const SIM_KO = Object.fromEntries(SIM_ROLES.map(r => [r[0], r[1]]));
-  // 카드 텍스트로 역할 추정: 패 트랩 / 스타터(덱에서 서치·특수 소환) / 엑스텐더(스스로 특수 소환) / 사고패(특수 소환 조건·일반 몬스터)
-  function dkGuessRole(c) {
-    if (!c) return 'other';
-    if (roleHit(ROLES[0], c.text)) return 'handtrap';
-    const t = c.text;
-    if (c.ct !== 'trap' && !/통상 소환할 수 없다/.test(t) && dkStarterSeg(c)) return 'starter';
-    if (c.ct === 'monster' && (/(?:패|묘지)에서 (?:이 카드를 )?특수 소환|이 카드를 (?:패|묘지)에서 특수 소환|이 카드는 (?:패|묘지)에서 특수 소환/.test(t))) return 'extender';
-    if (c.ct === 'monster' && (/통상 소환할 수 없다/.test(t) || (c.types.includes('일반') && !c.types.includes('효과')) || c.types.includes('의식'))) return 'brick';
-    return 'other';
+  // 카드 텍스트로 역할 추정
+  //  스타터 : 빈 필드에서 이 카드 1장만으로 발동해 덱·엑스트라 덱의 카드를 가져오는 효과가 있음 (일반 소환을 쓰는지도 구분)
+  //  엑스텐더 : 혼자서는 시작하지 못하지만 일반 소환 없이 전개를 늘림 (스스로 특수 소환 / 다른 카드가 조건을 만들면 덱에서 카드를 가져옴)
+  //  사고패 : 특수 소환 조건을 혼자 맞추기 어려운 몬스터, 일반 몬스터, 의식 몬스터
+  // 덱·엑스트라 덱의 카드를 가져오는 처리: 서치·특수 소환, 묘지로 보내기·제외(묘지·제외를 쓰는 덱의 시작점), 엑스트라 덱에서 하는 소환(덱의 카드를 소재로 쓰는 융합 등)
+  const RES_RE = /덱에서[^.。]*?(?:패에 (?:넣|더)|특수 소환|묘지로 보[내낸]|제외한다|제외하고)|엑스트라 덱에서[^.。]*?(?:특수 소환|융합 소환|싱크로 소환|엑시즈 소환|링크 소환)|(?:패 \/ 덱|덱)[^.。]*?융합 소재/;
+  const SETUP_RE = /자신 필드에[^.。]*?(?:"[^"]+"|[가-힣]+족|[가-힣]+ 속성|레벨|싱크로|엑시즈|링크|융합|의식|펜듈럼|토큰|효과|앞면)[^.。]*?(?:몬스터|카드)[^.。]*?(?:존재|있을|있는)|이 카드 이외의 자신|묘지로 보내졌을|묘지에 보내졌을|파괴되었을|파괴된 경우|제외되었을|특수 소환되었을|특수 소환된 경우|릴리스|소재로|버려졌을|되돌아갔을|공격|전투|데미지|상대가|엔드 페이즈|스탠바이 페이즈|묘지에 존재|제외되어 있는|발동했을|자신(?:의)? 묘지(?:에|의)/;
+  const segHead = (seg) => (seg.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '';
+  const needsSetup = (h) => SETUP_RE.test(String(h).replace(/[^.。,，]*?존재하지 않(?:을|는) 경우/g, ''));
+  const roleCache = new Map();
+  function dkRoleInfo(c) {
+    if (!c) return { role: 'other', why: '' };
+    if (roleCache.has(c.kid)) return roleCache.get(c.kid);
+    const t = c.text, segs = splitEffects(t), list = segs.length ? segs : [t];
+    const isMon = c.ct === 'monster', noNS = /통상 소환할 수 없다/.test(t);
+    const ssSeg = isMon ? list.find(x => /이 카드를 (?:패|묘지|패 \/ 묘지)에서 특수 소환|(?:패|묘지)에서 이 카드를 특수 소환|이 카드는 [^.。]*?(?:패|묘지)에서 특수 소환할 수 있다/.test(x)) : null;
+    const ssHead = ssSeg ? (segHead(ssSeg) || ssSeg.split(/[.。]/)[0]) : '';
+    const ssAlone = !!ssSeg && !needsSetup(ssHead) && !/엔드 페이즈|스탠바이 페이즈/.test(ssHead);
+    let info = null;
+    if (roleHit(ROLES[0], t)) info = { role: 'handtrap', why: '상대 턴에 패에서 발동하는 방해' };
+    else {
+      for (let i = 0; i < list.length && !info; i++) {
+        const seg = list[i];
+        if (!RES_RE.test(seg) || c.ct === 'trap') continue;
+        const h = segHead(seg);
+        if (needsSetup(h)) continue;
+        if (c.ct === 'spell') { if (i === 0 || !/(?:경우|때)/.test(h)) info = { role: 'starter', ns: false, why: '발동만으로 덱에서 카드를 가져옴' }; continue; }
+        if (/패에서 이 카드를|이 카드를 패에서|패의 이 카드를/.test(h)) { info = { role: 'starter', ns: false, why: '패에서 이 카드만으로 발동해 덱에서 카드를 가져옴' }; continue; }
+        const hs = h.replace(/특수 소환/g, '§');
+        if (/일반 소환|소환에 성공했을|소환했을 (?:경우|때)|소환되었을 경우/.test(hs)) { if (!noNS) info = { role: 'starter', ns: true, why: '일반 소환하면 덱에서 카드를 가져옴 (일반 소환 사용)' }; else if (ssAlone) info = { role: 'starter', ns: false, why: '스스로 특수 소환하고 덱에서 카드를 가져옴' }; continue; }
+        if (/§(?:했을|에 성공했을|된|되었을)/.test(hs)) { if (ssAlone) info = { role: 'starter', ns: false, why: '빈 필드에서 스스로 특수 소환하고 덱에서 카드를 가져옴' }; continue; }
+        if (!/(?:경우|때)/.test(h) && isMon) {
+          if (ssAlone) info = { role: 'starter', ns: false, why: '스스로 특수 소환한 뒤 덱에서 카드를 가져옴' };
+          else if (!noNS) info = { role: 'starter', ns: true, why: '일반 소환해서 효과를 쓰면 덱에서 카드를 가져옴 (일반 소환 사용)' };
+        }
+      }
+      if (!info && ssSeg) info = { role: 'extender', why: ssAlone ? '빈 필드에서도 스스로 특수 소환 (일반 소환 없이 몸을 늘림)' : '조건을 만족하면 스스로 특수 소환' };
+      if (!info && c.ct !== 'trap' && list.some(seg => RES_RE.test(seg) && needsSetup(segHead(seg)))) info = { role: 'extender', why: '다른 카드가 조건을 만들면 덱에서 카드를 가져옴' };
+      if (!info && isMon && (noNS || (c.types.includes('일반') && !c.types.includes('효과')) || c.types.includes('의식'))) info = { role: 'brick', why: noNS ? '특수 소환 조건을 혼자 맞추기 어려움' : (c.types.includes('의식') ? '의식 마법·릴리스가 필요' : '효과가 없는 일반 몬스터') };
+      if (!info) info = { role: 'other', why: '' };
+    }
+    roleCache.set(c.kid, info);
+    return info;
   }
-  // 혼자서 시작할 수 있는 「덱에서 서치·특수 소환」 효과가 있는지 (다른 카드로 묘지로 보내지거나 특수 소환되어야 하는 효과는 제외)
-  function dkStarterSeg(c) {
-    const segs = splitEffects(c.text); const list = segs.length ? segs : [c.text];
-    return list.some((seg, i) => {
-      if (!/덱에서[^.。]*?(?:패에 (?:넣|더)|특수 소환)/.test(seg)) return false;
-      const head = (seg.replace(/^[\u2460-\u2473]\s*[:：]\s*/, '').match(/^([\s\S]*?)(?:발동할 수 있다|발동한다)/) || [])[1] || '';
-      if (/묘지로 보내졌을|묘지에 보내졌을|파괴되었을|파괴된 경우|제외되었을|릴리스|소재로|버려졌을|되돌아갔을|공격|전투|데미지|상대가|엔드 페이즈|스탠바이 페이즈|묘지에 존재/.test(head)) return false;
-      if (c.ct === 'spell') return i === 0 || !/(?:경우|때)/.test(head);
-      if (/패에서 이 카드를|이 카드를 패에서|패의 이 카드를/.test(head)) return true;
-      if (/일반 소환|소환에 성공했을|소환했을 경우|소환했을 때/.test(head) && !/특수 소환(?:에 성공)?했을/.test(head.replace(/일반 소환 \/ 특수 소환|소환 \/ 특수 소환/g, '일반 소환'))) return true;
-      if (/일반 소환 \/ 특수 소환|소환 \/ 특수 소환/.test(head)) return true;
-      return !/(?:경우|때)/.test(head);   // 조건 없는 기동 효과
-    });
-  }
+  const dkGuessRole = (c) => dkRoleInfo(c).role;
   const dkRole = (d, kid) => (d.roles && d.roles[kid]) || dkGuessRole(DK.byKid.get(+kid));
   // 섞어서 n번 뽑아 보는 몬테카를로 시뮬레이션
   function dkSimRun(d, iters = 20000) {
@@ -4442,6 +4471,9 @@
     if (!st) out.push({ lv: 'high', title: '스타터가 없습니다', text: '혼자서 전개를 시작할 수 있는 카드(덱에서 서치·특수 소환)가 「카드 역할」에 하나도 없습니다. 역할 지정이 맞는지 확인하거나 스타터를 넣으세요.', add: stCand });
     else if (p5 < 0.85) out.push({ lv: p5 < 0.75 ? 'high' : 'mid', title: `선공 첫 패에 스타터가 올 확률 ${pct(p5)}`, text: `스타터 ${st}장으로는 다섯 판 중 ${Math.round((1 - p5) * 5 * 10) / 10}판꼴로 스타터 없이 시작합니다. 85%를 넘기려면 스타터가 ${need85}장(+${need85 - st}) 필요합니다.`, add: stCand });
     else out.push({ lv: 'good', title: `스타터가 안정적입니다 (선공 ${pct(p5)})`, text: `스타터 ${st}장 · 후공 6장일 때 ${pct(dkProb(N, st, 6))}.` });
+    // 1-1) 일반 소환을 쓰는 스타터만 있는 경우
+    const stNS = main.filter(([c, n, k]) => dkRole(d, k) === 'starter' && !(d.roles && d.roles[k]) && dkRoleInfo(c).ns).reduce((a, x) => a + x[1], 0), ex = roleN('extender');
+    if (st >= 6 && stNS / st >= 0.7 && ex < 6) out.push({ lv: 'info', title: `스타터 ${st}장 중 ${stNS}장이 일반 소환을 씁니다`, text: '일반 소환은 한 턴에 1번이라, 이런 스타터가 2장 와도 하나만 쓰기 쉽습니다. 일반 소환 없이 쓰는 스타터(서치 마법 등)나 엑스텐더를 늘리면 두 번째 카드도 살릴 수 있습니다.' });
     // 2) 덱 매수
     if (N > 40 && st) out.push({ lv: 'mid', title: `메인 덱이 ${N}장입니다`, text: `40장으로 줄이면 스타터가 올 확률이 ${pct(p5)} → ${pct(dkProb(40, st, 5))}로 올라갑니다. 덜 중요한 카드부터 빼세요.` });
     // 3) 사고패
@@ -4550,9 +4582,9 @@
 
       <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3 mb-3">
         <div class="text-xs font-extrabold text-slate-300"><i class="fa-solid fa-tags mr-1 text-amber-400"></i>카드 역할</div>
-        <p class="text-[10px] text-slate-500 mt-0.5 break-keep">카드 텍스트로 자동 추정했습니다. 덱에 맞게 바꾸면 이 덱에 저장되고, 위 진단과 아래 확률에 반영됩니다. 스타터: 혼자서 전개를 시작하는 카드 · 엑스텐더: 스타터와 함께 전개를 늘리는 카드 · 사고패: 혼자서는 쓰기 어려운 카드</p>
+        <p class="text-[10px] text-slate-500 mt-0.5 break-keep">카드 텍스트로 자동 추정했습니다. 덱에 맞게 바꾸면 이 덱에 저장되고, 위 진단과 아래 확률에 반영됩니다. 스타터: 빈 필드에서 이 카드 1장만으로 덱·엑스트라 덱의 카드를 가져와 전개를 시작하는 카드 · 엑스텐더: 혼자서는 시작하지 못하지만, 스타터가 움직인 뒤 일반 소환 없이 전개를 늘리는 카드 · 사고패: 혼자서는 쓰기 어려운 카드</p>
         <div class="flex flex-wrap gap-1 mt-1.5 text-[10px]">${SIM_ROLES.map(([k, n, cls]) => `<span class="rounded px-1.5 py-0.5 ${cls}">${n} ${roleCnt[k] || 0}장</span>`).join('')}</div>
-        <div class="flex flex-col gap-1 mt-2">${entries.map(([c, n, kid]) => `<div class="flex items-center gap-2 text-[12px]"><span class="flex-1 min-w-0 truncate">${esc(c.name)} <span class="text-slate-500">×${n}</span></span><select data-dk="simRole" data-kid="${kid}" class="${SEL} !py-1 flex-none">${SIM_ROLES.map(([k, nm]) => `<option value="${k}" ${dkRole(d, kid) === k ? 'selected' : ''}>${nm}${d.roles && d.roles[kid] ? '' : (dkGuessRole(c) === k ? ' (추정)' : '')}</option>`).join('')}</select></div>`).join('')}</div>
+        <div class="flex flex-col gap-1 mt-2">${entries.map(([c, n, kid]) => `<div class="flex items-center gap-2 text-[12px]"><span class="flex-1 min-w-0"><span class="block truncate">${esc(c.name)} <span class="text-slate-500">×${n}</span></span>${d.roles && d.roles[kid] ? '' : `<span class="block text-[10px] text-slate-500 truncate">${esc(dkRoleInfo(c).why)}</span>`}</span><select data-dk="simRole" data-kid="${kid}" class="${SEL} !py-1 flex-none">${SIM_ROLES.map(([k, nm]) => `<option value="${k}" ${dkRole(d, kid) === k ? 'selected' : ''}>${nm}${d.roles && d.roles[kid] ? '' : (dkGuessRole(c) === k ? ' (추정)' : '')}</option>`).join('')}</select></div>`).join('')}</div>
       </div>
 
       <div class="rounded-2xl border border-amber-800/50 bg-amber-950/10 p-3">
@@ -4581,37 +4613,62 @@
   }
 
   // ---------- 카드 추천 ----------
+  // 덱에 부족한 역할을 진단해서, 역할별로 이 덱과 맞는 카드를 추천
   function dkRecommend(d) {
     const inDeck = new Set([...Object.keys(d.main), ...Object.keys(d.extra), ...Object.keys(d.side)].map(Number));
-    if (!inDeck.size) return [];
-    const archs = dkDeckArch(d).slice(0, 3);
+    const N = dkCount(d.main);
+    if (!inDeck.size || N < 10) return [];
+    DK._stapleSet = DK._stapleSet || new Set([...dkStaples().ht, ...dkStaples().gen]);
     const deckCards = [...inDeck].map(k => DK.byKid.get(k)).filter(Boolean);
+    const main = Object.entries(d.main).map(([k, n]) => [DK.byKid.get(+k), n, +k]).filter(x => x[0]);
+    const roleN = (r) => main.reduce((a, [c, n, k]) => a + (dkRole(d, k) === r ? n : 0), 0);
+    const st = roleN('starter'), ex = roleN('extender'), ht = roleN('handtrap');
+    const brk = main.reduce((a, [c, n]) => a + (BREAKER.test(c.text) ? n : 0), 0);
+    const p5 = dkProb(N, st, 5);
+    const archs = dkDeckArch(d).slice(0, 2).map(x => x.a);
+    const md = dkMatchMeta(d), MB = md ? (md.ocg || md.tcg) : null, metaPer = new Map(MB ? MB.cards.map(([k, per]) => [k, per]) : []);
     const names = deckCards.map(c => c.name).filter(n => n.length >= 2);
-    const attrCnt = new Map(), raceCnt = new Map();
-    for (const c of deckCards) if (c.ct === 'monster') { attrCnt.set(c.attr, (attrCnt.get(c.attr) || 0) + 1); raceCnt.set(c.race, (raceCnt.get(c.race) || 0) + 1); }
-    const topAttr = [...attrCnt.entries()].sort((a, b) => b[1] - a[1])[0], topRace = [...raceCnt.entries()].sort((a, b) => b[1] - a[1])[0];
-    const out = [];
-    for (const c of DK.db) {
-      if (dkLim(c.kid) <= dkCopies(d, c.kid)) continue;
-      let s = 0; const r = [];
-      for (const { a, n } of archs) {
-        if (c.arch === a.en) { s += 6 + Math.min(4, n / 4); r.push(`같은 테마 (${a.ko || a.en})`); break; }
-        if (a.ko && c.text.includes(`"${a.ko}"`)) { s += 5; r.push(`「${a.ko}」 카드를 지원`); break; }
-      }
+    const avail = (c) => dkLim(c.kid) > dkCopies(d, c.kid);
+    // 이 덱과의 관계 (구체적인 이유)
+    const relation = (c) => {
+      const r = []; let s = 0;
+      const a = archs.find(a => c.arch === a.en || (a.ko && (c.name.includes(a.ko) || c.text.includes(`"${a.ko}"`))));
+      if (a) { s += 4; r.push(c.arch === a.en || (a.ko && c.name.includes(a.ko)) ? `「${a.ko || a.en}」 카드` : `「${a.ko}」 카드를 지원`); }
       let refs = 0;
-      for (const nm of names) if (refs < 2 && nm !== c.name && c.text.includes(`"${nm}"`)) { refs++; s += 3; r.push(`「${nm}」을(를) 다룸`); }
-      if (deckCards.some(x => x.kid !== c.kid && x.text.includes(`"${c.name}"`))) { s += 4; r.push('덱의 카드가 이 카드를 다룸'); }
-      if (topAttr && topAttr[1] >= 4 && topAttr[0] && c.text.includes(`${topAttr[0]} 속성`)) { s += 1.5; r.push(`${topAttr[0]} 속성 지원`); }
-      if (topRace && topRace[1] >= 4 && topRace[0] && c.text.includes(topRace[0])) { s += 1.5; r.push(`${topRace[0]} 지원`); }
-      if (!s) continue;
-      if (inDeck.has(c.kid)) { s -= 4; r.push(`덱에 ${dkCopies(d, c.kid)}장`); }
-      if (STAPLE_HT.includes(c.kid) || STAPLE_GEN.includes(c.kid)) { s += 0.5; r.push('범용 카드'); }
-      s += c.kid / 1e6;
-      out.push({ c, s, r });
-    }
-    // 아무 테마도 없으면 범용 카드
-    if (!out.length) for (const k of [...STAPLE_HT, ...STAPLE_GEN]) { const c = DK.byKid.get(k); if (c && dkLim(k) > dkCopies(d, k)) out.push({ c, s: 1, r: [STAPLE_HT.includes(k) ? '범용 패 트랩' : '범용 카드'] }); }
-    return out.sort((a, b) => b.s - a.s).slice(0, 40);
+      for (const nm of names) if (refs < 2 && nm !== c.name && c.text.includes(`"${nm}"`)) { refs++; s += 3; r.push(RES_RE.test(c.text.split(`"${nm}"`)[1] || '') ? `${jo(`「${nm}」`, '을', '를')} 서치·특수 소환` : `${jo(`「${nm}」`, '과', '와')} 연계`); }
+      const by = deckCards.find(x => x.kid !== c.kid && x.text.includes(`"${c.name}"`));
+      if (by) { s += 3; r.push(`${jo(`「${by.name}」`, '으로', '로')} 가져올 수 있음`); }
+      const per = metaPer.get(c.kid);
+      if (per) { s += per / 20; r.push(`대회 덱 ${per}% 채용`); }
+      return { s, r };
+    };
+    const groups = [];
+    const pctS = (p) => `${(p * 100).toFixed(1)}%`;
+    const push = (key, title, need, status, items) => { if (items.length) groups.push({ key, title, need, status, items: items.slice(0, 6) }); };
+    // 테마 · 대회 덱 카드 중 역할별 후보
+    const pool = DK.db.filter(c => avail(c) && !c.extra && (archs.some(a => c.arch === a.en || (a.ko && (c.name.includes(a.ko) || c.text.includes(`"${a.ko}"`)))) || metaPer.has(c.kid) || names.some(nm => c.text.includes(`"${nm}"`))));
+    const scored = pool.map(c => { const rel = relation(c), ri = dkRoleInfo(c); return { c, s: rel.s + (inDeck.has(c.kid) ? -2 : 0) + c.kid / 1e6, r: [...(ri.why ? [ri.why] : []), ...rel.r, ...(inDeck.has(c.kid) ? [`덱에 ${dkCopies(d, c.kid)}장`] : [])], role: ri.role, ns: ri.ns }; }).filter(x => x.s > 0);
+    const byRole = (role) => scored.filter(x => x.role === role).sort((a, b) => b.s - a.s);
+    const stNeed = p5 < 0.75 ? 3 : p5 < 0.85 ? 2 : 0.6;
+    push('starter', '스타터 후보', stNeed, `덱에 스타터 ${st}장 · 선공 첫 패에 올 확률 ${pctS(p5)}${p5 < 0.85 ? ' → 부족' : ' → 충분'}`, byRole('starter').sort((a, b) => (a.ns ? 1 : 0) - (b.ns ? 1 : 0) || b.s - a.s));
+    const exNeed = ex < Math.max(3, st * 0.4) ? 1.8 : 0.7;
+    push('extender', '엑스텐더 후보', exNeed, `덱에 엑스텐더 ${ex}장${exNeed > 1 ? ' → 스타터에 비해 적음' : ''}`, byRole('extender'));
+    // 패 트랩: 대회에서 많이 쓰는 순 (이 덱 테마의 패 트랩도 포함)
+    const htItems = [...new Set([...byRole('handtrap').map(x => x.c.kid), ...dkStaples().ht])].map(k => DK.byKid.get(k)).filter(c => c && avail(c))
+      .map(c => { const g = DK.meta && DK.meta.genericMain ? DK.meta.genericMain.find(x => x[0] === c.kid) : null; return { c, s: (g ? g[1] : 0) + (metaPer.get(c.kid) || 0), r: ['상대 턴에 패에서 발동하는 방해', ...(g ? [`대회 덱 유형 ${g[1]}개에서 채용`] : []), ...(metaPer.get(c.kid) ? [`이 덱 유형 대회 덱 ${metaPer.get(c.kid)}% 채용`] : []), ...(inDeck.has(c.kid) ? [`덱에 ${dkCopies(d, c.kid)}장`] : [])] }; })
+      .sort((a, b) => (inDeck.has(a.c.kid) ? 1 : 0) - (inDeck.has(b.c.kid) ? 1 : 0) || b.s - a.s);
+    push('handtrap', '패 트랩 후보', ht < 3 ? 3 : ht < 6 ? 2 : ht < 9 ? 1 : 0.4, `덱에 패 트랩 ${ht}장 · 후공 첫 패에 올 확률 ${pctS(dkProb(N, ht, 6))}${ht < 6 ? ' → 부족' : ''}`, htItems);
+    // 후공용 필드 해결
+    const brPool = [...new Set([...(DK.meta && DK.meta.genericMain ? DK.meta.genericMain.map(x => x[0]) : []), 14742, 14876, 15299, 4678])].map(k => DK.byKid.get(k)).filter(c => c && avail(c) && BREAKER.test(c.text));
+    push('breaker', '후공용 필드 해결 카드', brk ? 0.5 : 1.5, `덱에 ${brk}장${brk ? '' : ' → 상대 필드를 한꺼번에 처리할 카드가 없음'}`, brPool.map(c => ({ c, s: 1, r: [(c.text.match(/상대 필드의[^.。]*?(?:전부|모두)[^.。]*?(?:파괴|제외|무효)[^.。]*/) || ['필드를 한꺼번에 처리'])[0].slice(0, 40)] })));
+    // 엑스트라 덱
+    const X = dkCount(d.extra);
+    const exPool = [...DK.db.filter(c => c.extra && avail(c) && !inDeck.has(c.kid) && (archs.some(a => c.arch === a.en || (a.ko && c.name.includes(a.ko))) || metaPer.has(c.kid))),
+      ...(DK.meta && DK.meta.genericExtra ? DK.meta.genericExtra.map(x => DK.byKid.get(x[0])).filter(c => c && avail(c) && !inDeck.has(c.kid) && dkExtraOk(c, d)) : [])];
+    push('extra', '엑스트라 덱 후보', X < 15 ? 1.2 : 0.3, `엑스트라 덱 ${X}/15장`, [...new Set(exPool)].map(c => { const rel = relation(c); return { c, s: rel.s + (dkExtraOk(c, d) ? 2 : 0), r: [...(dkExtraOk(c, d) ? ['이 덱의 튜너·레벨로 소환 가능'] : []), ...rel.r] }; }).sort((a, b) => b.s - a.s));
+    // 그 밖에 이 덱과 잘 맞는 카드
+    push('other', '그 밖에 이 덱과 연계되는 카드', 0.2, '스타터·엑스텐더는 아니지만 덱의 카드와 연계되는 카드', scored.filter(x => x.role === 'other' && x.s >= 5).sort((a, b) => b.s - a.s));
+    return groups.sort((a, b) => b.need - a.need);
   }
   function dkRoleSearch(roles, q, kind) {
     const res = [];
@@ -4881,7 +4938,7 @@
 
   function dkRecoHtml(d) {
     const R = DK.reco;
-    const rec = dkRecommend(d);
+    const groups = dkRecommend(d);
     const found = (R.roles.length || R.q.trim()) ? dkRoleSearch(R.roles, R.q, R.kind) : null;
     return `
       <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3 mb-3">
@@ -4895,9 +4952,13 @@
         ${found ? `<div class="flex flex-col gap-1 mt-2">${found.length ? found.map(x => dkResultRow(x.c, x.sent ? `<div class="text-[10px] text-slate-500 truncate">${esc(x.sent)}</div>` : '')).join('') : '<p class="text-xs text-slate-500">조건에 맞는 카드가 없습니다.</p>'}</div>` : ''}
       </div>
       <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
-        <div class="text-xs font-extrabold text-slate-300 mb-1"><i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i>「${esc(d.name)}」에 어울리는 카드</div>
-        <p class="text-[10px] text-slate-500 mb-2 break-keep">같은 테마, 덱의 카드를 서치·지원하는 카드, 덱의 카드가 다루는 카드, 많이 쓴 속성·종족을 지원하는 카드를 텍스트로 찾습니다.</p>
-        <div class="flex flex-col gap-1">${rec.length ? rec.map(x => dkResultRow(x.c, `<div class="text-[10px] text-emerald-300/90 truncate">${esc(x.r.slice(0, 3).join(' · '))}</div>`)).join('') : '<p class="text-xs text-slate-500">덱에 카드를 넣으면 어울리는 카드를 추천합니다.</p>'}</div>
+        <div class="text-xs font-extrabold text-slate-300 mb-1"><i class="fa-solid fa-lightbulb mr-1 text-amber-400"></i>「${esc(d.name)}」에 필요한 카드</div>
+        <p class="text-[10px] text-slate-500 mb-2 break-keep">덱의 카드 역할(덱 분석 탭)을 세어 부족한 역할부터 보여줍니다. 각 역할에서는 이 덱의 카드와 직접 연계되는 카드(서치·특수 소환 대상, 이 덱 카드로 가져올 수 있는 카드)와 대회 덱 채용률이 높은 카드를 앞에 둡니다.</p>
+        ${groups.length ? groups.map(g => `<div class="mt-2">
+          <div class="flex items-center gap-1.5 flex-wrap"><span class="text-[12px] font-extrabold">${esc(g.title)}</span><span class="text-[10px] rounded px-1.5 py-0.5 ${g.need >= 1.5 ? 'bg-rose-700 text-white' : g.need >= 1 ? 'bg-amber-500 text-ink-900' : 'bg-slate-700 text-slate-200'}">${g.need >= 1.5 ? '우선' : g.need >= 1 ? '권장' : '참고'}</span></div>
+          <p class="text-[10px] text-slate-400 mt-0.5 break-keep">${esc(g.status)}</p>
+          <div class="flex flex-col gap-1 mt-1">${g.items.map(x => dkResultRow(x.c, `<div class="text-[10px] text-emerald-300/90 break-keep line-clamp-2">${esc(x.r.slice(0, 3).join(' · '))}</div>`)).join('')}</div>
+        </div>`).join('') : '<p class="text-xs text-slate-500">메인 덱에 카드를 10장 이상 넣으면 필요한 카드를 추천합니다.</p>'}
       </div>`;
   }
 
@@ -4956,7 +5017,7 @@
         case 'condClear': { const c = DK.sim.conds[+t.dataset.ci]; if (c) c.kids = []; DK.sim.res = null; break; }
         case 'condAdd': if (DK.sim.conds.length < 3) DK.sim.conds.push({ kids: [], n: 1 }); break;
         case 'condDel': DK.sim.conds.splice(+t.dataset.ci, 1); DK.sim.res = null; break;
-        case 'fixAdd': if (dkAdd(kid, 'deck')) dkToast(`「${(DK.byKid.get(kid) || {}).name}」를 넣었습니다.`); break;
+        case 'fixAdd': if (dkAdd(kid, 'deck')) dkToast(`${jo(`「${(DK.byKid.get(kid) || {}).name}」`, '을', '를')} 넣었습니다.`); break;
         case 'fixCut': { const c = DK.byKid.get(kid), sec = c && c.extra ? 'extra' : 'main'; if (d[sec][kid]) { d[sec][kid]--; if (!d[sec][kid]) delete d[sec][kid]; DK.sim.deckId = null; DK.sim.res = null; dkToast(`「${c.name}」 1장을 뺐습니다.`); } break; }
         case 'role': { const v = t.dataset.v, r = DK.reco.roles; DK.reco.roles = r.includes(v) ? r.filter(x => x !== v) : [...r, v]; break; }
         default: return;
@@ -5006,7 +5067,7 @@
   route();
   loadIndex(false);
   // 로컬 개발 서버에서만: 전체 카드 텍스트 점검용 판정 함수
-  if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) window.__ygo = { analyze, classify, effKind, isActivated, actZone, effLocation, linkAction, targetSpec, summonSpec, costSpec, responseCond, summonNeg, guessOut, evMatches, immediatePart, resolvePart, faqClass, negGuess, textLang, splitEffects, CH, cardCache, protParse, equipSpec, DK, dkLoad, dkAutoBuild, dkMetaBuild, dkMetaFind, dkFillExtra, dkToText, dkExportRows, dkCheck, dkRecommend, dkRoleSearch, dkImport, dkToYdk, dkArchFind, dkLim, cantNegate, noChainTo, validateOut, validateChain, simulate, postTriggers, linkHtml, outHtml, resolveHtml, nextHtml, segocHtml, eventHtml };
+  if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) window.__ygo = { analyze, classify, effKind, isActivated, actZone, effLocation, linkAction, targetSpec, summonSpec, costSpec, responseCond, summonNeg, guessOut, evMatches, immediatePart, resolvePart, faqClass, negGuess, textLang, splitEffects, CH, cardCache, protParse, equipSpec, DK, dkLoad, dkAutoBuild, dkMetaBuild, dkRoleInfo, dkDiagnose, dkMetaFind, dkFillExtra, dkToText, dkExportRows, dkCheck, dkRecommend, dkRoleSearch, dkImport, dkToYdk, dkArchFind, dkLim, cantNegate, noChainTo, validateOut, validateChain, simulate, postTriggers, linkHtml, outHtml, resolveHtml, nextHtml, segocHtml, eventHtml };
 })();
 </script>
 </body>
