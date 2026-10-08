@@ -38,14 +38,14 @@ def get(url, tries=4, timeout=60):
 
 
 def card_row(kid, ko, prev=None):
-    """[kid, name, cardType, property, properties, attribute, level, atk, def, linkArrows, passcode, archetype, text]"""
+    """[kid, name, cardType, property, properties, attribute, level(엑시즈는 랭크), atk, def, linkArrows, passcode, archetype, text, pendulumScale]"""
     text = (ko.get('effectText') or '').strip()
     pend = (ko.get('pendulumEffectText') or '').strip()
     if pend:
         text = '【펜듈럼 효과】' + pend + '\n【몬스터 효과】' + text
     return [kid, ko.get('name') or '', ko.get('cardType') or '', ko.get('property') or '', ko.get('properties') or [],
-            ko.get('attribute') or '', ko.get('level'), ko.get('atk'), ko.get('def'), ko.get('linkArrows') or '',
-            prev[10] if prev else None, prev[11] if prev else None, text]
+            ko.get('attribute') or '', ko.get('level') if ko.get('level') is not None else ko.get('rank'), ko.get('atk'), ko.get('def'), ko.get('linkArrows') or '',
+            prev[10] if prev else None, prev[11] if prev else None, text, ko.get('pendulumScale')]
 
 
 def fetch_card(kid):
@@ -168,6 +168,7 @@ def main():
     todo = [i for i in ids if i not in rows]
     if a.refresh:
         todo += [i for i in sorted(rows)[-a.refresh:] if i not in todo]
+    todo += [i for i in sorted(rows) if len(rows[i]) < 14 and i not in todo]   # 예전 형식(랭크 · 펜듈럼 스케일 없음)
     print('받을 카드', len(todo))
     with cf.ThreadPoolExecutor(a.workers) as ex:
         for kid, ko in ex.map(fetch_card, todo):
@@ -192,7 +193,7 @@ def main():
     cards = sorted(rows.values(), key=lambda r: r[0])
     old = json.load(open(cpath, encoding='utf-8')) if os.path.exists(cpath) else {}
     if old.get('cards') != json.loads(json.dumps(cards, ensure_ascii=False)):   # 내용이 바뀐 경우에만 날짜 갱신
-        json.dump({'updated': time.strftime('%Y-%m-%d'), 'fields': ['kid', 'name', 'cardType', 'property', 'properties', 'attribute', 'level', 'atk', 'def', 'linkArrows', 'passcode', 'archetype', 'text'], 'cards': cards},
+        json.dump({'updated': time.strftime('%Y-%m-%d'), 'fields': ['kid', 'name', 'cardType', 'property', 'properties', 'attribute', 'level', 'atk', 'def', 'linkArrows', 'passcode', 'archetype', 'text', 'pendulumScale'], 'cards': cards},
                   open(cpath, 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
     print('cards.json', len(cards), os.path.getsize(cpath) // 1024, 'KB')
 

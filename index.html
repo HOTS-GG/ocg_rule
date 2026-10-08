@@ -124,6 +124,8 @@
         </div>
       </div>
 
+      <div id="advWrap"></div>
+
       <div id="recentWrap" class="hidden">
         <div class="flex items-center justify-between mb-2 px-1">
           <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider"><i class="fa-solid fa-clock-rotate-left mr-1"></i>최근 조회</h2>
@@ -1323,6 +1325,159 @@
   $$('.ex-chip').forEach(b => b.addEventListener('click', () => {
     els.input.value = b.dataset.q; els.clear.classList.remove('hidden'); els.input.focus(); runSearch(b.dataset.q);
   }));
+
+  // ======================================================================
+  // 상세 검색 (카드 종류 · 레벨 · 종족 · 속성 · 마법/함정 종류로 거르기) — 한국 발매 카드 데이터(data/cards.json) 사용
+  // ======================================================================
+  const ADV_MTYPES = ['일반', '효과', '융합', '의식', '싱크로', '엑시즈', '펜듈럼', '링크', '튜너', '특수 소환', '리버스', '스피릿', '유니온', '듀얼', '툰'];
+  const ADV_ATTRS = ['어둠', '빛', '땅', '물', '화염', '바람', '신'];
+  const ADV_RACES = Object.values(PROP).filter(p => p[0] === 'race').map(p => p[1]);
+  const ADV_SPELL = ['normal', 'quickplay', 'continuous', 'equip', 'field', 'ritual'];
+  const ADV_TRAP = ['normal', 'continuous', 'counter'];
+  const ADV_SORT = [['new', '최신순'], ['old', '오래된순'], ['name', '이름순'], ['atk', '공격력 높은 순'], ['def', '수비력 높은 순'], ['lv', '레벨/랭크 높은 순']];
+  const ADV = { open: false, kind: 'all', mt: new Set(), mtNot: new Set(), attr: new Set(), race: new Set(), lv: new Set(), link: new Set(), scale: new Set(), sp: new Set(), tp: new Set(), atkMin: '', atkMax: '', defMin: '', defMax: '', name: '', text: '', sort: 'new', shown: 0, rows: null };
+  const advLinkN = (c) => String(c.link || '').length;
+  const advHasFilter = () => ADV.kind !== 'all' || ADV.name || ADV.text || ['mt', 'mtNot', 'attr', 'race', 'lv', 'link', 'scale', 'sp', 'tp'].some(k => ADV[k].size) || ADV.atkMin || ADV.atkMax || ADV.defMin || ADV.defMax;
+  const advNum = (v) => (v === '' || v == null || isNaN(+v)) ? null : +v;
+
+  function advCompute() {
+    const nq = ADV.name ? norm(ADV.name) : '', cq = ADV.name && /^[ㄱ-ㅎ]+$/.test(ADV.name.replace(/\s/g, '')) ? ADV.name.replace(/\s/g, '') : '';
+    const tq = ADV.text.trim().split(/\s+/).filter(Boolean);
+    const am = advNum(ADV.atkMin), aM = advNum(ADV.atkMax), dm = advNum(ADV.defMin), dM = advNum(ADV.defMax);
+    const monsterOnly = ADV.mt.size || ADV.mtNot.size || ADV.attr.size || ADV.race.size || ADV.lv.size || ADV.link.size || ADV.scale.size || am != null || aM != null || dm != null || dM != null;
+    const rows = DK.db.filter(c => {
+      if (ADV.kind !== 'all' && c.ct !== ADV.kind) return false;
+      if (c.ct === 'monster') {
+        if (ADV.sp.size || ADV.tp.size) { if (ADV.kind === 'all') return false; }
+        for (const t of ADV.mt) if (!c.types.includes(t)) return false;
+        for (const t of ADV.mtNot) if (c.types.includes(t)) return false;
+        if (ADV.attr.size && !ADV.attr.has(c.attr)) return false;
+        if (ADV.race.size && !ADV.race.has(c.race)) return false;
+        if (ADV.lv.size && (c.types.includes('링크') || !ADV.lv.has(Number(c.lv)))) return false;
+        if (ADV.link.size && !ADV.link.has(advLinkN(c))) return false;
+        if (ADV.scale.size && !ADV.scale.has(c.scale)) return false;
+        const atk = c.atk === '?' || c.atk == null ? null : Number(c.atk), def = c.types.includes('링크') || c.def === '?' || c.def == null ? null : Number(c.def);
+        if ((am != null && !(atk >= am)) || (aM != null && !(atk != null && atk <= aM))) return false;
+        if ((dm != null && !(def >= dm)) || (dM != null && !(def != null && def <= dM))) return false;
+      } else {
+        if (monsterOnly) return false;
+        if (c.ct === 'spell' && (ADV.tp.size || (ADV.sp.size && !ADV.sp.has(c.prop || 'normal')))) return false;
+        if (c.ct === 'trap' && (ADV.sp.size || (ADV.tp.size && !ADV.tp.has(c.prop || 'normal')))) return false;
+      }
+      if (nq && !c.nk.includes(nq) && !(cq && c.cho.includes(cq))) return false;
+      for (const w of tq) if (!c.text.includes(w)) return false;
+      return true;
+    });
+    const n = (v) => (v == null || v === '?' || isNaN(+v)) ? -1 : +v;
+    const S = {
+      new: (a, b) => b.kid - a.kid, old: (a, b) => a.kid - b.kid, name: (a, b) => a.name.localeCompare(b.name, 'ko'),
+      atk: (a, b) => n(b.atk) - n(a.atk) || b.kid - a.kid, def: (a, b) => n(b.types.includes('링크') ? null : b.def) - n(a.types.includes('링크') ? null : a.def) || b.kid - a.kid,
+      lv: (a, b) => (b.types.includes('링크') ? advLinkN(b) : n(b.lv)) - (a.types.includes('링크') ? advLinkN(a) : n(a.lv)) || b.kid - a.kid
+    };
+    ADV.rows = rows.sort(S[ADV.sort] || S.new);
+    ADV.shown = 0;
+  }
+
+  const advChip = (grp, val, label, on, cls = '') => `<button data-adv="${grp}" data-v="${esc(String(val))}" class="rounded-full px-2.5 py-1 text-[11px] font-bold border ${on ? 'bg-amber-500 border-amber-500 text-ink-900' : 'border-slate-700 text-slate-300 bg-slate-900/60'} ${cls}">${label}</button>`;
+  const advRow = (title, body, hint) => `<div class="mt-2.5"><div class="text-[11px] font-bold text-slate-400 mb-1">${title}${hint ? ` <span class="font-normal text-slate-500">${hint}</span>` : ''}</div><div class="flex flex-wrap gap-1">${body}</div></div>`;
+  const ADV_IN = 'w-16 bg-slate-800 border border-slate-700 rounded-lg text-xs px-2 py-1.5 text-slate-100 outline-none focus:border-amber-500';
+
+  function advPanelHtml() {
+    const showMon = ADV.kind === 'all' || ADV.kind === 'monster', showSp = ADV.kind === 'all' || ADV.kind === 'spell', showTr = ADV.kind === 'all' || ADV.kind === 'trap';
+    const cnt = ['mt', 'mtNot', 'attr', 'race', 'lv', 'link', 'scale', 'sp', 'tp'].reduce((a, k) => a + ADV[k].size, 0) + (ADV.kind !== 'all') + !!ADV.name + !!ADV.text + [ADV.atkMin, ADV.atkMax, ADV.defMin, ADV.defMax].filter(Boolean).length;
+    return `<div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-3 mb-3">
+      <button data-adv="toggle" class="w-full flex items-center gap-2 text-left">
+        <i class="fa-solid fa-sliders text-amber-400"></i><span class="text-sm font-extrabold">상세 검색</span>
+        <span class="text-[11px] text-slate-500">카드 종류 · 레벨 · 종족 · 속성으로 찾기</span>
+        ${cnt ? `<span class="ml-auto text-[10px] font-black rounded-full bg-amber-500 text-ink-900 px-1.5">${cnt}</span>` : ''}
+        <i class="fa-solid fa-chevron-${ADV.open ? 'up' : 'down'} text-slate-500 text-xs ${cnt ? '' : 'ml-auto'}"></i>
+      </button>
+      ${ADV.open ? `<div class="mt-2">
+        <div class="flex gap-1.5">
+          <input data-adv-in="name" value="${esc(ADV.name)}" placeholder="카드명 · 초성" class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded-lg text-xs px-2.5 py-2 outline-none focus:border-amber-500" type="search" autocomplete="off">
+          <input data-adv-in="text" value="${esc(ADV.text)}" placeholder="효과 텍스트에 포함 (띄어 쓰면 모두 포함)" class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded-lg text-xs px-2.5 py-2 outline-none focus:border-amber-500" type="search" autocomplete="off">
+        </div>
+        ${advRow('카드 종류', [['all', '전체'], ['monster', '몬스터'], ['spell', '마법'], ['trap', '함정']].map(([v, l]) => advChip('kind', v, l, ADV.kind === v)).join(''))}
+        ${showMon ? `
+          ${advRow('몬스터 종류', ADV_MTYPES.map(t => advChip('mt', t, t, ADV.mt.has(t))).join(''), '고른 것을 모두 가진 몬스터 (예: 싱크로 + 튜너)')}
+          ${advRow('제외할 종류', ADV_MTYPES.map(t => advChip('mtNot', t, t, ADV.mtNot.has(t), ADV.mtNot.has(t) ? '!bg-rose-600 !border-rose-600 !text-white' : '')).join(''), '이 종류를 가진 몬스터는 빼기 (예: 펜듈럼 제외)')}
+          ${advRow('레벨 / 랭크', Array.from({ length: 14 }, (_, i) => i).map(n => advChip('lv', n, n, ADV.lv.has(n))).join(''), '여러 개 고르면 그중 하나')}
+          ${advRow('링크', [1, 2, 3, 4, 5, 6].map(n => advChip('link', n, 'LINK-' + n, ADV.link.has(n))).join(''))}
+          ${advRow('펜듈럼 스케일', Array.from({ length: 14 }, (_, i) => i).map(n => advChip('scale', n, n, ADV.scale.has(n))).join(''))}
+          ${advRow('속성', ADV_ATTRS.map(a => advChip('attr', a, a, ADV.attr.has(a))).join(''))}
+          ${advRow('종족', ADV_RACES.map(r => advChip('race', r, r, ADV.race.has(r))).join(''))}
+          <div class="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
+            <span class="font-bold">공격력</span><input data-adv-in="atkMin" inputmode="numeric" value="${esc(ADV.atkMin)}" placeholder="이상" class="${ADV_IN}"><span>~</span><input data-adv-in="atkMax" inputmode="numeric" value="${esc(ADV.atkMax)}" placeholder="이하" class="${ADV_IN}">
+            <span class="font-bold ml-2">수비력</span><input data-adv-in="defMin" inputmode="numeric" value="${esc(ADV.defMin)}" placeholder="이상" class="${ADV_IN}"><span>~</span><input data-adv-in="defMax" inputmode="numeric" value="${esc(ADV.defMax)}" placeholder="이하" class="${ADV_IN}">
+          </div>` : ''}
+        ${showSp ? advRow('마법 카드 종류', ADV_SPELL.map(p => advChip('sp', p, SPELL[p].label, ADV.sp.has(p))).join('')) : ''}
+        ${showTr ? advRow('함정 카드 종류', ADV_TRAP.map(p => advChip('tp', p, TRAP[p].label, ADV.tp.has(p))).join('')) : ''}
+        <div class="mt-3 flex items-center gap-1.5">
+          <select data-adv-in="sort" class="${ADV_IN} !w-auto">${ADV_SORT.map(([v, l]) => `<option value="${v}" ${ADV.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <button data-adv="reset" class="ml-auto rounded-lg border border-slate-700 text-slate-400 text-[11px] font-bold px-2.5 py-1.5"><i class="fa-solid fa-rotate-left mr-1"></i>조건 초기화</button>
+        </div>
+      </div>` : ''}
+    </div>
+    ${ADV.open ? '<div id="advResults"></div>' : ''}`;
+  }
+
+  function advResultRow(c) {
+    const stat = c.ct === 'monster' ? `${c.atk ?? '?'}${c.types.includes('링크') ? '' : ` / ${c.def ?? '?'}`}` : '';
+    return `<button class="advRes w-full text-left flex items-center gap-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 px-2 py-1.5 hover:border-slate-600 active:bg-slate-800" data-id="${c.kid}">
+      ${c.pass ? `<img src="${dkImg(c)}" loading="lazy" alt="" class="w-9 h-[52px] object-cover rounded bg-slate-800 flex-none">` : '<div class="w-9 h-[52px] rounded bg-slate-800 flex-none"></div>'}
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-bold truncate">${esc(c.name)}</div>
+        <div class="text-[11px] text-slate-400 truncate">${esc(dkType(c))}</div>
+      </div>
+      ${stat ? `<span class="text-[11px] font-bold text-slate-300 flex-none tabular-nums">${stat}</span>` : ''}
+    </button>`;
+  }
+
+  function advRenderResults() {
+    const box = $('#advResults'); if (!box) return;
+    if (!DK.db) { box.innerHTML = `<div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-center text-sm text-slate-400"><i class="fa-solid fa-circle-notch spin text-amber-400 mr-1"></i>카드 데이터를 불러오는 중…</div>`; return; }
+    if (!advHasFilter()) { box.innerHTML = '<p class="text-[11px] text-slate-500 px-1 mb-3">조건을 고르면 한국 발매 카드에서 찾습니다.</p>'; return; }
+    if (!ADV.rows) advCompute();
+    const next = ADV.rows.slice(0, ADV.shown = Math.max(ADV.shown, Math.min(60, ADV.rows.length)));
+    box.innerHTML = `<div class="text-[11px] text-slate-400 px-1 mb-1.5">한국 발매 카드 ${fmt(DK.db.length)}장 중 <b class="text-amber-300">${fmt(ADV.rows.length)}</b>장</div>
+      <div class="flex flex-col gap-1">${next.map(advResultRow).join('')}</div>
+      ${ADV.rows.length > ADV.shown ? `<button data-adv="more" class="mt-1.5 w-full rounded-lg border border-slate-700 text-xs font-bold text-slate-300 py-2">더 보기 (${fmt(ADV.rows.length - ADV.shown)}장 남음)</button>` : ''}
+      ${ADV.rows.length ? '' : '<div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-center text-sm text-slate-400">조건에 맞는 카드가 없습니다.</div>'}
+      <div class="h-3"></div>`;
+  }
+
+  function advRender() {
+    const w = $('#advWrap'); if (!w) return;
+    w.innerHTML = advPanelHtml();
+    if (ADV.open) advRenderResults();
+  }
+  function advChanged() { ADV.rows = null; ADV.shown = 0; advRender(); }
+
+  $('#advWrap').addEventListener('click', async (e) => {
+    const r = e.target.closest('.advRes'); if (r) { goCard(Number(r.dataset.id)); return; }
+    const b = e.target.closest('[data-adv]'); if (!b) return;
+    const g = b.dataset.adv, v = b.dataset.v;
+    if (g === 'toggle') { ADV.open = !ADV.open; advRender(); if (ADV.open && !DK.db) { await dkLoad(); advRender(); } return; }
+    if (g === 'more') { ADV.shown += 60; advRenderResults(); return; }
+    if (g === 'reset') { Object.assign(ADV, { kind: 'all', atkMin: '', atkMax: '', defMin: '', defMax: '', name: '', text: '', sort: 'new' }); ['mt', 'mtNot', 'attr', 'race', 'lv', 'link', 'scale', 'sp', 'tp'].forEach(k => ADV[k].clear()); advChanged(); return; }
+    if (g === 'kind') { ADV.kind = v; if (v === 'spell' || v === 'trap') { ['mt', 'mtNot', 'attr', 'race', 'lv', 'link', 'scale'].forEach(k => ADV[k].clear()); Object.assign(ADV, { atkMin: '', atkMax: '', defMin: '', defMax: '' }); } if (v !== 'spell' && v !== 'all') ADV.sp.clear(); if (v !== 'trap' && v !== 'all') ADV.tp.clear(); advChanged(); return; }
+    const set = ADV[g]; if (!set) return;
+    const val = (g === 'lv' || g === 'link' || g === 'scale') ? Number(v) : v;
+    set.has(val) ? set.delete(val) : set.add(val);
+    if (g === 'mt') ADV.mtNot.delete(val); if (g === 'mtNot') ADV.mt.delete(val);
+    if (['mt', 'mtNot', 'attr', 'race', 'lv', 'link', 'scale'].includes(g) && ADV.kind === 'all') ADV.kind = 'monster';
+    if (g === 'sp' && ADV.kind === 'all' && !ADV.tp.size) ADV.kind = 'spell';
+    if (g === 'tp' && ADV.kind === 'all' && !ADV.sp.size) ADV.kind = 'trap';
+    advChanged();
+  });
+  let advTimer = null;
+  $('#advWrap').addEventListener('input', (e) => {
+    const k = e.target.dataset.advIn; if (!k || k === 'sort') return;
+    ADV[k] = e.target.value; clearTimeout(advTimer);
+    advTimer = setTimeout(() => { ADV.rows = null; ADV.shown = 0; advRenderResults(); }, 220);
+  });
+  $('#advWrap').addEventListener('change', (e) => { if (e.target.dataset.advIn === 'sort') { ADV.sort = e.target.value; advChanged(); } });
+  advRender();
 
   // ======================================================================
   // 전체 카드 목록 (점진 렌더링)
@@ -4102,16 +4257,16 @@
   }
   const dkLim = (kid) => { const L = DK.ban && DK.ban[DK.reg]; const v = L && L.list[String(kid)]; return v === undefined ? 3 : v; };
   function dkRow(r) {
-    const [kid, name, ct, prop, props, attr, lv, atk, def, link, pass, arch, text] = r;
+    const [kid, name, ct, prop, props, attr, lv, atk, def, link, pass, arch, text, scale] = r;
     const P = (props || []).map(c => PROP[c]).filter(Boolean);
     const types = P.filter(p => p[0] === 'type').map(p => p[1]);
     const race = (P.find(p => p[0] === 'race') || [])[1] || '';
     const extra = ct === 'monster' && (props || []).some(c => EXTRA_P.includes(c));
-    return { kid, name, ct, prop, props: props || [], types, race, attr: ATTR_KO[attr] || '', lv, atk, def, link, pass, arch, text: text || '', extra,
+    return { kid, name, ct, prop, props: props || [], types, race, attr: ATTR_KO[attr] || '', lv, atk, def, link, pass, arch, text: text || '', extra, scale: scale ?? null,
       kind: ct === 'monster' ? (extra ? 'extra' : 'monster') : ct, nk: norm(name), cho: chosung(name) };
   }
   const dkType = (c) => c.ct === 'spell' ? (SPELL[c.prop] || SPELL.normal).label : c.ct === 'trap' ? (TRAP[c.prop] || TRAP.normal).label
-    : [c.types.filter(t => t !== '효과').join('·') || '효과', c.race, c.attr && c.attr + ' 속성', c.types.includes('링크') ? `LINK-${String(c.link || '').length}` : (c.lv != null ? `${c.types.includes('엑시즈') ? '랭크' : '레벨'} ${c.lv}` : '')].filter(Boolean).join(' · ');
+    : [c.types.filter(t => t !== '효과').join('·') || '효과', c.race, c.attr && c.attr + ' 속성', c.types.includes('링크') ? `LINK-${String(c.link || '').length}` : (c.lv != null ? `${c.types.includes('엑시즈') ? '랭크' : '레벨'} ${c.lv}` : ''), c.types.includes('펜듈럼') && c.scale != null ? `스케일 ${c.scale}` : ''].filter(Boolean).join(' · ');
   const dkImg = (c) => c && c.pass ? `https://images.ygoprodeck.com/images/cards_small/${c.pass}.jpg` : '';
 
   async function dkLoad() {
